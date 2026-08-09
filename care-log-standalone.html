@@ -273,7 +273,7 @@ function Sparkline({ points, kind, unitSystem, scaleMax, meds, domain, onViewCha
   const svgRef = useRef(null);
   const gestureRef = useRef(null);
   const [showMedList, setShowMedList] = useState(false);
-  const width = 260, height = 56, pad = 6;
+  const width = 260, height = 100, pad = 8;
   const chartLeft = 34; // reserve space for axis labels
   const plotWidth = width - chartLeft;
   if (!points || points.length === 0) {
