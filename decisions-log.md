@@ -35,6 +35,7 @@ been decided rather than re-deriving it. "Open questions" are things flagged but
 | Temperature value labels | Bounded, not all-or-nothing: label every point when ≤8 are visible, otherwise always show exactly "Now" and "Peak" (never fully unlabeled, never cluttered) at any zoom level |
 | Data editing | Both symptom entries and medications are fully editable (value/name/dose and timestamp) and deletable after logging, not just deletable |
 | Logging discipline | Claude adds a row to `ai-usage-log.md` and `decisions-log.md` immediately within the same turn as any substantive change, not deferred to a later "catch-up" — see note at the bottom of this file |
+| Health concern grouping | Trackers can belong to multiple health concerns at once (many-to-many, not one tracker = one group) — a symptom like cough can legitimately sit under both "Cold/Flu" and "Allergies". Concerns are created/selected during the template-add flow (reuses an existing concern by matching name rather than creating duplicates); dashboard has an "All / By health concern" toggle with an "Other" section for untagged trackers |
 
 ## Open questions (not yet decided)
 
