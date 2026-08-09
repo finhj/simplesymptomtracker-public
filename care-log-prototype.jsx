@@ -522,7 +522,7 @@ function Sparkline({ points, kind, unitSystem, scaleMax, meds, treatments, flagg
         <text x={width} y={xAxisY} textAnchor="end" style={axisLabelStyle}>{fmtAxisTime(maxX)}</text>
         <path d={d} fill="none" stroke={ink} strokeWidth={1.5} />
         {display.map((p, i) => (
-          <circle key={i} cx={scaleX(p.t)} cy={scaleY(p.v)} r={2.5} fill={kind === "temperature" && p.v >= feverLine ? red : teal} />
+          <circle key={i} cx={scaleX(p.t)} cy={scaleY(p.v)} r={4} fill={kind === "temperature" && p.v >= feverLine ? red : teal} />
         ))}
         {/* Temperature values written next to each point when there's room. Once a
             chart has more points than fit cleanly, it doesn't go silent — it always
@@ -652,6 +652,8 @@ export default function CareLog() {
   const [treatments, setTreatments] = useState([]); // [{id, name, dose, timestamp, deletedAt}] — ECT, ketamine infusions, chemo, physical therapy, etc.; same shape as meds but clinic-administered, not self-taken
   const [treatmentName, setTreatmentName] = useState("");
   const [treatmentDetail, setTreatmentDetail] = useState("");
+  const [treatmentMedNames, setTreatmentMedNames] = useState([]); // medications given as part of the treatment being logged
+  const [treatmentNewMedName, setTreatmentNewMedName] = useState("");
   const [markPeriodConcernId, setMarkPeriodConcernId] = useState(null); // which concern's "mark a period" form is open
   const [periodLabelInput, setPeriodLabelInput] = useState("Relapse");
   const [periodStartInput, setPeriodStartInput] = useState("");
@@ -962,6 +964,16 @@ export default function CareLog() {
 
   const knownMedNames = useMemo(() => [...new Set(activeMeds.map((m) => m.name.trim().toLowerCase()))], [activeMeds]);
   const medCatalogCount = knownMedNames.length;
+  // Original-case distinct medication names (knownMedNames above is lowercased for
+  // dedup checks) — used for the treatment-medication-linking picker's display.
+  const distinctMedNamesDisplay = useMemo(() => {
+    const seen = new Map();
+    activeMeds.forEach((m) => {
+      const key = m.name.trim().toLowerCase();
+      if (!seen.has(key)) seen.set(key, m.name.trim());
+    });
+    return [...seen.values()];
+  }, [activeMeds]);
 
   const filteredTemplates = useMemo(() => {
     const q = templateQuery.trim().toLowerCase();
@@ -1047,12 +1059,16 @@ export default function CareLog() {
     setSelectedConcernIds((prev) => (prev.includes(id) ? prev.filter((c) => c !== id) : [...prev, id]));
   }
 
-  // Shared by both the template-add flow and the custom-tracker flow — resolves the
-  // selected/typed concerns into a final id list, creating a new Concern only if the
-  // typed name doesn't match one that already exists.
-  function resolveConcernIds() {
-    let finalConcernIds = [...selectedConcernIds];
-    const trimmedNew = newConcernName.trim();
+  function toggleTreatmentMedName(name) {
+    setTreatmentMedNames((prev) => (prev.includes(name) ? prev.filter((n) => n !== name) : [...prev, name]));
+  }
+
+  // Shared by the template-add, custom-tracker, medication, and treatment flows —
+  // resolves the selected/typed concerns into a final id list, creating a new
+  // Concern only if the typed name doesn't match one that already exists.
+  function resolveConcernIds(selectedIds, newName) {
+    let finalConcernIds = [...selectedIds];
+    const trimmedNew = (newName || "").trim();
     if (trimmedNew) {
       const existing = concerns.find((c) => c.name.toLowerCase() === trimmedNew.toLowerCase());
       if (existing) {
@@ -1074,7 +1090,7 @@ export default function CareLog() {
 
     // A tracker can end up tagged with multiple concerns — that's the point, since a
     // symptom like a cough can genuinely belong to more than one thing at once.
-    const finalConcernIds = resolveConcernIds();
+    const finalConcernIds = resolveConcernIds(selectedConcernIds, newConcernName);
 
     const newTrackers = toAdd.map((tr) => ({
       id: uid(),
@@ -1137,7 +1153,7 @@ export default function CareLog() {
 
   function addPendingCustomTracker() {
     if (!pendingCustomTracker || remainingSlots <= 0) return;
-    const finalConcernIds = resolveConcernIds();
+    const finalConcernIds = resolveConcernIds(selectedConcernIds, newConcernName);
 
     // Questionnaires reference a QUESTIONNAIRES entry directly — no separate reusable
     // CustomTrackerDefinition needed, since QUESTIONNAIRES already is that reusable list.
@@ -1177,13 +1193,14 @@ export default function CareLog() {
     setDraftValues((d) => ({ ...d, [trackerId]: undefined }));
   }
 
-  function addMedication(atTime) {
+  function addMedication(atTime, concernSelection, newConcernNameInput) {
     const name = medName.trim();
     if (!name) return;
     const isNewDistinct = !knownMedNames.includes(name.toLowerCase());
     if (isNewDistinct && medCatalogCount >= MAX_MEDICATIONS) return;
     const timestamp = atTime ? new Date(atTime).toISOString() : new Date().toISOString();
-    setMeds((prev) => [...prev, { id: uid(), name, dose: medDose.trim(), timestamp }]);
+    const concernIds = resolveConcernIds(concernSelection || [], newConcernNameInput || "");
+    setMeds((prev) => [...prev, { id: uid(), name, dose: medDose.trim(), timestamp, concernIds }]);
     setMedName("");
     setMedDose("");
   }
@@ -1230,11 +1247,11 @@ export default function CareLog() {
     setFlaggedPeriods((prev) => prev.map((p) => (p.id === id ? { ...p, deletedAt: undefined } : p)));
   }
 
-  function updateMed(id, newName, newDose, newTimeInput) {
+  function updateMed(id, newName, newDose, newTimeInput, newConcernIds) {
     setMeds((prev) =>
       prev.map((m) =>
         m.id === id
-          ? { ...m, name: newName, dose: newDose, timestamp: newTimeInput ? new Date(newTimeInput).toISOString() : m.timestamp }
+          ? { ...m, name: newName, dose: newDose, timestamp: newTimeInput ? new Date(newTimeInput).toISOString() : m.timestamp, concernIds: newConcernIds }
           : m
       )
     );
@@ -1243,13 +1260,24 @@ export default function CareLog() {
   // ---------- Treatments (ECT, ketamine infusions, chemo, physical therapy, etc.) ----------
   // Same shape and pattern as medications — clinic-administered rather than self-taken,
   // so kept as a separate list/section rather than mixed into the medication log.
-  function addTreatment(atTime) {
+  function addTreatment(atTime, concernSelection, newConcernNameInput) {
     const name = treatmentName.trim();
     if (!name) return;
     const timestamp = atTime ? new Date(atTime).toISOString() : new Date().toISOString();
-    setTreatments((prev) => [...prev, { id: uid(), name, dose: treatmentDetail.trim(), timestamp }]);
+    // Linked medications: selected known names, plus a typed new one if it doesn't
+    // already match an existing name — same resolve-or-create pattern used for
+    // concerns, just without needing to persist a new entity (this is a label list).
+    const typed = treatmentNewMedName.trim();
+    const finalMedNames = [...treatmentMedNames];
+    if (typed && !finalMedNames.some((n) => n.toLowerCase() === typed.toLowerCase())) {
+      finalMedNames.push(typed);
+    }
+    const concernIds = resolveConcernIds(concernSelection || [], newConcernNameInput || "");
+    setTreatments((prev) => [...prev, { id: uid(), name, dose: treatmentDetail.trim(), timestamp, medicationNames: finalMedNames, concernIds }]);
     setTreatmentName("");
     setTreatmentDetail("");
+    setTreatmentMedNames([]);
+    setTreatmentNewMedName("");
   }
 
   function deleteTreatment(id) {
@@ -1260,11 +1288,11 @@ export default function CareLog() {
     setTreatments((prev) => prev.map((t) => (t.id === id ? { ...t, deletedAt: undefined } : t)));
   }
 
-  function updateTreatment(id, newName, newDetail, newTimeInput) {
+  function updateTreatment(id, newName, newDetail, newTimeInput, newMedicationNames, newConcernIds) {
     setTreatments((prev) =>
       prev.map((t) =>
         t.id === id
-          ? { ...t, name: newName, dose: newDetail, timestamp: newTimeInput ? new Date(newTimeInput).toISOString() : t.timestamp }
+          ? { ...t, name: newName, dose: newDetail, timestamp: newTimeInput ? new Date(newTimeInput).toISOString() : t.timestamp, medicationNames: newMedicationNames, concernIds: newConcernIds }
           : t
       )
     );
@@ -1305,7 +1333,7 @@ export default function CareLog() {
     lines.push("Treatments:");
     if (recentTreatments.length === 0) lines.push("  none logged");
     else groupMedsByDisplayTime(recentTreatments).forEach((g) =>
-      lines.push(`  ${g.label} — ${g.items.map(medLabel).join(", ")}`)
+      lines.push(`  ${g.label} — ${g.items.map((t) => `${medLabel(t)}${t.medicationNames && t.medicationNames.length > 0 ? ` (with ${t.medicationNames.join(", ")})` : ""}`).join(", ")}`)
     );
     return lines.join("\n");
   }, [activeTrackers, activeEntries, activeMeds, activeTreatments, profile.unitSystem]);
@@ -1758,6 +1786,18 @@ export default function CareLog() {
                               )}
 
                               {g.trackers.map((t) => renderCard(t, g.id))}
+
+                              {(() => {
+                                const concernMedNames = [...new Set(activeMeds.filter((m) => (m.concernIds || []).includes(g.id)).map((m) => m.name))];
+                                const concernTreatmentNames = [...new Set(activeTreatments.filter((tr) => (tr.concernIds || []).includes(g.id)).map((tr) => tr.name))];
+                                if (concernMedNames.length === 0 && concernTreatmentNames.length === 0) return null;
+                                return (
+                                  <div style={{ fontSize: 12, color: inkSoft, marginTop: 4, marginBottom: 4 }}>
+                                    {concernMedNames.length > 0 && <div>Medications: {concernMedNames.join(", ")}</div>}
+                                    {concernTreatmentNames.length > 0 && <div>Treatments: {concernTreatmentNames.join(", ")}</div>}
+                                  </div>
+                                );
+                              })()}
                             </div>
                           );
                         })}
@@ -1786,6 +1826,7 @@ export default function CareLog() {
               onUpdate={updateMed}
               catalogCount={medCatalogCount}
               knownMedNames={knownMedNames}
+              concerns={concerns}
             />
 
             <TreatmentSection
@@ -1794,9 +1835,15 @@ export default function CareLog() {
               setTreatmentName={setTreatmentName}
               treatmentDetail={treatmentDetail}
               setTreatmentDetail={setTreatmentDetail}
+              treatmentMedNames={treatmentMedNames}
+              toggleTreatmentMedName={toggleTreatmentMedName}
+              treatmentNewMedName={treatmentNewMedName}
+              setTreatmentNewMedName={setTreatmentNewMedName}
+              knownMedicationNames={distinctMedNamesDisplay}
               onAdd={addTreatment}
               onDelete={deleteTreatment}
               onUpdate={updateTreatment}
+              concerns={concerns}
             />
 
             <ReportSection
@@ -2437,7 +2484,7 @@ function TemplatePicker({
   );
 }
 
-function MedicationSection({ meds, medName, setMedName, medDose, setMedDose, onAdd, onDelete, onUpdate, catalogCount, knownMedNames }) {
+function MedicationSection({ meds, medName, setMedName, medDose, setMedDose, onAdd, onDelete, onUpdate, catalogCount, knownMedNames, concerns }) {
   const sorted = [...meds].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp)).slice(0, 6);
   const grouped = groupMedsByDisplayTime(sorted);
   const isNewDistinct = medName.trim() && !knownMedNames.includes(medName.trim().toLowerCase());
@@ -2448,22 +2495,36 @@ function MedicationSection({ meds, medName, setMedName, medDose, setMedDose, onA
   const [editDose, setEditDose] = useState("");
   const [editTime, setEditTime] = useState("");
   const [collapsed, setCollapsed] = useState(false);
+  const [medConcernIds, setMedConcernIds] = useState([]);
+  const [medNewConcernName, setMedNewConcernName] = useState("");
+  const [editConcernIds, setEditConcernIds] = useState([]);
+  const [editNewConcernName, setEditNewConcernName] = useState("");
 
+  function toggleMedConcern(id) {
+    setMedConcernIds((prev) => (prev.includes(id) ? prev.filter((c) => c !== id) : [...prev, id]));
+  }
+  function toggleEditMedConcern(id) {
+    setEditConcernIds((prev) => (prev.includes(id) ? prev.filter((c) => c !== id) : [...prev, id]));
+  }
   function startEdit(m) {
     setEditingMedId(m.id);
     setEditName(m.name);
     setEditDose(m.dose || "");
     setEditTime(isoToLocalInput(m.timestamp));
+    setEditConcernIds(m.concernIds || []);
+    setEditNewConcernName("");
   }
   function cancelEdit() {
     setEditingMedId(null);
     setEditName("");
     setEditDose("");
     setEditTime("");
+    setEditConcernIds([]);
+    setEditNewConcernName("");
   }
   function saveEdit() {
     if (!editName.trim()) return;
-    onUpdate(editingMedId, editName.trim(), editDose.trim(), editTime);
+    onUpdate(editingMedId, editName.trim(), editDose.trim(), editTime, editConcernIds, editNewConcernName);
     cancelEdit();
   }
 
@@ -2485,6 +2546,13 @@ function MedicationSection({ meds, medName, setMedName, medDose, setMedDose, onA
       {atCap && (
         <div style={{ ...errorStyle, marginBottom: 8 }}>Free plan: 15 medications tracked. Delete an unused one to add a new name.</div>
       )}
+      <ConcernPicker
+        concerns={concerns}
+        selectedConcernIds={medConcernIds}
+        toggleConcernSelection={toggleMedConcern}
+        newConcernName={medNewConcernName}
+        setNewConcernName={setMedNewConcernName}
+      />
       {customTime === null ? (
         <button
           onClick={() => setCustomTime(nowForInput())}
@@ -2508,7 +2576,12 @@ function MedicationSection({ meds, medName, setMedName, medDose, setMedDose, onA
       <button
         style={{ ...primaryBtnSmall, opacity: !medName.trim() || atCap ? 0.5 : 1 }}
         disabled={!medName.trim() || atCap}
-        onClick={() => { onAdd(customTime); setCustomTime(null); }}
+        onClick={() => {
+          onAdd(customTime, medConcernIds, medNewConcernName);
+          setCustomTime(null);
+          setMedConcernIds([]);
+          setMedNewConcernName("");
+        }}
       >
         Add medication
       </button>
@@ -2525,11 +2598,18 @@ function MedicationSection({ meds, medName, setMedName, medDose, setMedDose, onA
                         <input value={editName} onChange={(e) => setEditName(e.target.value)} style={{ ...inputStyle, padding: "6px 8px", fontSize: 13, flex: 1.4 }} />
                         <input value={editDose} onChange={(e) => setEditDose(e.target.value)} style={{ ...inputStyle, padding: "6px 8px", fontSize: 13, flex: 1 }} />
                       </div>
+                      <ConcernPicker
+                        concerns={concerns}
+                        selectedConcernIds={editConcernIds}
+                        toggleConcernSelection={toggleEditMedConcern}
+                        newConcernName={editNewConcernName}
+                        setNewConcernName={setEditNewConcernName}
+                      />
                       <input
                         type="datetime-local"
                         value={editTime}
                         onChange={(e) => setEditTime(e.target.value)}
-                        style={{ ...inputStyle, padding: "6px 8px", fontSize: 12, width: "100%", marginBottom: 6 }}
+                        style={{ ...inputStyle, padding: "6px 8px", fontSize: 12, width: "100%", marginTop: 8, marginBottom: 6 }}
                       />
                       <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                         <button onClick={saveEdit} style={{ ...primaryBtnSmall, padding: "6px 12px", fontSize: 12 }}>Save</button>
@@ -2562,7 +2642,11 @@ function MedicationSection({ meds, medName, setMedName, medDose, setMedDose, onA
   );
 }
 
-function TreatmentSection({ treatments, treatmentName, setTreatmentName, treatmentDetail, setTreatmentDetail, onAdd, onDelete, onUpdate }) {
+function TreatmentSection({
+  treatments, treatmentName, setTreatmentName, treatmentDetail, setTreatmentDetail,
+  treatmentMedNames, toggleTreatmentMedName, treatmentNewMedName, setTreatmentNewMedName, knownMedicationNames,
+  onAdd, onDelete, onUpdate, concerns,
+}) {
   const sorted = [...treatments].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp)).slice(0, 6);
   const grouped = groupMedsByDisplayTime(sorted); // same time-grouping helper works for any {name, dose, timestamp}-shaped item
   const [customTime, setCustomTime] = useState(null); // null = log at "now" (the fast default)
@@ -2570,25 +2654,64 @@ function TreatmentSection({ treatments, treatmentName, setTreatmentName, treatme
   const [editName, setEditName] = useState("");
   const [editDetail, setEditDetail] = useState("");
   const [editTime, setEditTime] = useState("");
+  const [editMedNames, setEditMedNames] = useState([]);
+  const [editNewMedName, setEditNewMedName] = useState("");
   const [collapsed, setCollapsed] = useState(false);
+  const [treatmentConcernIds, setTreatmentConcernIds] = useState([]);
+  const [treatmentNewConcernName, setTreatmentNewConcernName] = useState("");
+  const [editConcernIds, setEditConcernIds] = useState([]);
+  const [editNewConcernName, setEditNewConcernName] = useState("");
 
+  function toggleTreatmentConcern(id) {
+    setTreatmentConcernIds((prev) => (prev.includes(id) ? prev.filter((c) => c !== id) : [...prev, id]));
+  }
+  function toggleEditConcern(id) {
+    setEditConcernIds((prev) => (prev.includes(id) ? prev.filter((c) => c !== id) : [...prev, id]));
+  }
   function startEdit(t) {
     setEditingId(t.id);
     setEditName(t.name);
     setEditDetail(t.dose || "");
     setEditTime(isoToLocalInput(t.timestamp));
+    setEditMedNames(t.medicationNames || []);
+    setEditNewMedName("");
+    setEditConcernIds(t.concernIds || []);
+    setEditNewConcernName("");
   }
   function cancelEdit() {
     setEditingId(null);
     setEditName("");
     setEditDetail("");
     setEditTime("");
+    setEditMedNames([]);
+    setEditNewMedName("");
+    setEditConcernIds([]);
+    setEditNewConcernName("");
+  }
+  function toggleEditMedName(name) {
+    setEditMedNames((prev) => (prev.includes(name) ? prev.filter((n) => n !== name) : [...prev, name]));
   }
   function saveEdit() {
     if (!editName.trim()) return;
-    onUpdate(editingId, editName.trim(), editDetail.trim(), editTime);
+    const typed = editNewMedName.trim();
+    const finalNames = [...editMedNames];
+    if (typed && !finalNames.some((n) => n.toLowerCase() === typed.toLowerCase())) finalNames.push(typed);
+    onUpdate(editingId, editName.trim(), editDetail.trim(), editTime, finalNames, editConcernIds, editNewConcernName);
     cancelEdit();
   }
+
+  const medPickerChip = (name, checked, onToggle) => (
+    <button
+      key={name}
+      onClick={onToggle}
+      style={{
+        ...toggleBtn, padding: "5px 10px", fontSize: 12,
+        ...(checked ? toggleBtnActive : {}),
+      }}
+    >
+      {name}
+    </button>
+  );
 
   return (
     <div style={{ background: card, border: `1px solid ${border}`, borderRadius: 16, padding: 14, marginTop: 20, marginBottom: 16 }}>
@@ -2608,6 +2731,32 @@ function TreatmentSection({ treatments, treatmentName, setTreatmentName, treatme
         <input placeholder="Physical therapy" value={treatmentName} onChange={(e) => setTreatmentName(e.target.value)} style={{ ...inputStyle, flex: 1.4 }} />
         <input placeholder="Detail (optional)" value={treatmentDetail} onChange={(e) => setTreatmentDetail(e.target.value)} style={{ ...inputStyle, flex: 1 }} />
       </div>
+
+      <div style={{ marginBottom: 8 }}>
+        <div style={{ fontSize: 12, fontWeight: 600, color: inkSoft, marginBottom: 4 }}>Medications given (optional)</div>
+        {knownMedicationNames.length > 0 && (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 6 }}>
+            {knownMedicationNames.map((name) =>
+              medPickerChip(name, treatmentMedNames.includes(name), () => toggleTreatmentMedName(name))
+            )}
+          </div>
+        )}
+        <input
+          placeholder="New medication name"
+          value={treatmentNewMedName}
+          onChange={(e) => setTreatmentNewMedName(e.target.value)}
+          style={{ ...inputStyle, fontSize: 13, padding: "6px 8px" }}
+        />
+      </div>
+
+      <ConcernPicker
+        concerns={concerns}
+        selectedConcernIds={treatmentConcernIds}
+        toggleConcernSelection={toggleTreatmentConcern}
+        newConcernName={treatmentNewConcernName}
+        setNewConcernName={setTreatmentNewConcernName}
+      />
+
       {customTime === null ? (
         <button
           onClick={() => setCustomTime(nowForInput())}
@@ -2631,7 +2780,12 @@ function TreatmentSection({ treatments, treatmentName, setTreatmentName, treatme
       <button
         style={{ ...primaryBtnSmall, opacity: !treatmentName.trim() ? 0.5 : 1 }}
         disabled={!treatmentName.trim()}
-        onClick={() => { onAdd(customTime); setCustomTime(null); }}
+        onClick={() => {
+          onAdd(customTime, treatmentConcernIds, treatmentNewConcernName);
+          setCustomTime(null);
+          setTreatmentConcernIds([]);
+          setTreatmentNewConcernName("");
+        }}
       >
         Add treatment
       </button>
@@ -2648,11 +2802,32 @@ function TreatmentSection({ treatments, treatmentName, setTreatmentName, treatme
                         <input value={editName} onChange={(e) => setEditName(e.target.value)} style={{ ...inputStyle, padding: "6px 8px", fontSize: 13, flex: 1.4 }} />
                         <input value={editDetail} onChange={(e) => setEditDetail(e.target.value)} style={{ ...inputStyle, padding: "6px 8px", fontSize: 13, flex: 1 }} />
                       </div>
+                      <div style={{ fontSize: 12, fontWeight: 600, color: inkSoft, marginBottom: 4 }}>Medications given</div>
+                      {knownMedicationNames.length > 0 && (
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 6 }}>
+                          {knownMedicationNames.map((name) =>
+                            medPickerChip(name, editMedNames.includes(name), () => toggleEditMedName(name))
+                          )}
+                        </div>
+                      )}
+                      <input
+                        placeholder="New medication name"
+                        value={editNewMedName}
+                        onChange={(e) => setEditNewMedName(e.target.value)}
+                        style={{ ...inputStyle, fontSize: 12, padding: "6px 8px", marginBottom: 6 }}
+                      />
+                      <ConcernPicker
+                        concerns={concerns}
+                        selectedConcernIds={editConcernIds}
+                        toggleConcernSelection={toggleEditConcern}
+                        newConcernName={editNewConcernName}
+                        setNewConcernName={setEditNewConcernName}
+                      />
                       <input
                         type="datetime-local"
                         value={editTime}
                         onChange={(e) => setEditTime(e.target.value)}
-                        style={{ ...inputStyle, padding: "6px 8px", fontSize: 12, width: "100%", marginBottom: 6 }}
+                        style={{ ...inputStyle, padding: "6px 8px", fontSize: 12, width: "100%", marginTop: 8, marginBottom: 6 }}
                       />
                       <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                         <button onClick={saveEdit} style={{ ...primaryBtnSmall, padding: "6px 12px", fontSize: 12 }}>Save</button>
@@ -2669,7 +2844,7 @@ function TreatmentSection({ treatments, treatmentName, setTreatmentName, treatme
                     <span key={t.id} style={{ display: "inline-flex", alignItems: "center", gap: 2, fontSize: 14 }}>
                       {i > 0 && <span style={{ color: inkSoft, marginRight: 2 }}>,</span>}
                       <button onClick={() => startEdit(t)} style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontSize: 14, color: ink, textDecoration: "underline", textDecorationColor: border }}>
-                        {medLabel(t)}
+                        {medLabel(t)}{t.medicationNames && t.medicationNames.length > 0 ? ` (with ${t.medicationNames.join(", ")})` : ""}
                       </button>
                     </span>
                   )
