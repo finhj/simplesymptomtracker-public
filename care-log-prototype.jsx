@@ -3,7 +3,7 @@ import { Plus, Lock, Search, X, ChevronLeft, Check, Trash2, FileText, Copy } fro
 
 const STORAGE_KEY = "care-log-vault-v1";
 const PBKDF2_ITERATIONS = 300000;
-const MAX_TRACKERS = 3;
+const MAX_TRACKERS = 20; // Personal build — the real free-tier cap (3) only matters once there's an actual entitlement system with other users to enforce it against.
 const MAX_MEDICATIONS = 15;
 
 // Canonical storage is always Celsius; display converts at the edges.
@@ -180,6 +180,22 @@ function groupMedsByDisplayTime(sortedMeds) {
 function medLabel(m) {
   return m.name + (m.dose ? ` ${m.dose}` : "");
 }
+// Deterministic color per medication name — same drug always gets the same color,
+// across sessions and re-renders, without needing to track any assignment order.
+const MED_COLOR_PALETTE = ["#2563EB", "#9333EA", "#D97706", "#16A34A", "#DB2777", "#4F46E5", "#0D9488", "#EA580C", "#C026D3", "#65A30D"];
+function medColorForName(name) {
+  const key = (name || "").trim().toLowerCase();
+  // FNV-1a — the previous simple polynomial hash (hash*31+char) distributes poorly
+  // when reduced with a small modulus like the palette length, since 31 ≡ -1 (mod 8)
+  // makes the low bits cycle instead of spreading out — that's what caused the
+  // reported collisions (three different drugs landing on the same color).
+  let hash = 2166136261;
+  for (let i = 0; i < key.length; i++) {
+    hash ^= key.charCodeAt(i);
+    hash = Math.imul(hash, 16777619) >>> 0;
+  }
+  return MED_COLOR_PALETTE[hash % MED_COLOR_PALETTE.length];
+}
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
@@ -189,15 +205,31 @@ function Sparkline({ points, kind, unitSystem, scaleMax, meds, domain, onViewCha
   const svgRef = useRef(null);
   const gestureRef = useRef(null);
   const [showMedList, setShowMedList] = useState(false);
-  const width = 260, height = 56, pad = 6;
+  const [showMedMarkers, setShowMedMarkers] = useState(true);
+  const width = 260, height = 100, pad = 8;
   const chartLeft = 34; // reserve space for axis labels
   const plotWidth = width - chartLeft;
   if (!points || points.length === 0) {
     return <div style={{ fontSize: 12, color: inkSoft, padding: "18px 0" }}>No readings yet</div>;
   }
   const display = kind === "temperature" ? points.map((p) => ({ t: p.t, v: displayTemp(p.v, unitSystem) })) : points;
-  const minY = kind === "temperature" ? (unitSystem === "imperial" ? 95 : 35) : 0;
-  const maxY = kind === "temperature" ? (unitSystem === "imperial" ? 106 : 41) : (scaleMax || 5);
+  let minY, maxY;
+  if (kind === "temperature") {
+    minY = unitSystem === "imperial" ? 95 : 35;
+    maxY = unitSystem === "imperial" ? 106 : 41;
+  } else if (kind === "number") {
+    // No fixed range for a general numeric tracker (unlike severity's fixed 0-max) —
+    // scale to the actual logged values, with padding so the line isn't pinned to the edges.
+    const vals = points.map((p) => p.v);
+    const dataMin = Math.min(...vals);
+    const dataMax = Math.max(...vals);
+    const rangePad = Math.max((dataMax - dataMin) * 0.15, 1);
+    minY = dataMin - rangePad;
+    maxY = dataMax + rangePad;
+  } else {
+    minY = 0;
+    maxY = scaleMax || 5;
+  }
   const feverLine = kind === "temperature" ? displayTemp(FEVER_C, unitSystem) : null;
   const unit = kind === "temperature" ? tempUnitLabel(unitSystem) : "";
   const xs = display.map((p) => p.t);
@@ -280,6 +312,12 @@ function Sparkline({ points, kind, unitSystem, scaleMax, meds, domain, onViewCha
     .map((m) => ({ ...m, t: new Date(m.timestamp).getTime() }))
     .filter((m) => m.t >= minX - medPad && m.t <= maxX + medPad)
     .sort((a, b) => a.t - b.t);
+  // Chart markers: one diamond per individual dose, never merged — two drugs taken
+  // together are still two separate doses and get two separate, differently-colored
+  // markers, even though they're staggered close together for visibility. The
+  // grouped/combined version (chartMedGroups below) is only used for the readable
+  // tap-to-expand list, where combining same-time doses onto one line is purely a
+  // display convenience, not a change to the underlying data.
   const chartMedGroups = groupMedsByDisplayTime(medsInRange).map((g) => ({
     label: g.items.map(medLabel).join(", "),
     t: g.items[0].t,
@@ -293,11 +331,11 @@ function Sparkline({ points, kind, unitSystem, scaleMax, meds, domain, onViewCha
   const MIN_MARKER_GAP_PX = 14;
   let lastX = -Infinity;
   let stagger = 0;
-  const staggeredMeds = chartMedGroups.map((g) => {
-    const x = scaleX(g.t);
+  const staggeredMeds = medsInRange.map((m) => {
+    const x = scaleX(m.t);
     stagger = x - lastX < MIN_MARKER_GAP_PX ? stagger + 1 : 0;
     lastX = x;
-    return { ...g, x, extraLift: stagger * 7 };
+    return { ...m, x, extraLift: stagger * 7, color: medColorForName(m.name) };
   });
   // Bounded label set so the chart stays clean at every zoom level, not just some of
   // them. When there's room, label every point. When zoomed out to many points, don't
@@ -329,10 +367,9 @@ function Sparkline({ points, kind, unitSystem, scaleMax, meds, domain, onViewCha
   }
 
   const AXIS_ROW_HEIGHT = 14;
-  const medRowHeight = staggeredMeds.length ? MED_ROW_GAP + 8 + Math.max(...staggeredMeds.map((m) => m.extraLift), 0) : 0;
+  const medRowHeight = showMedMarkers && staggeredMeds.length ? MED_ROW_GAP + 8 + Math.max(...staggeredMeds.map((m) => m.extraLift), 0) : 0;
   const chartHeight = height + medRowHeight + AXIS_ROW_HEIGHT;
-  const medDark = "#33506E"; // darker than the standard blue accent, for better contrast at small sizes
-  const sortedMedList = [...staggeredMeds].sort((a, b) => a.t - b.t);
+  const sortedMedList = groupMedsByDisplayTime(medsInRange); // grouped-by-time, for the readable list only
   const xAxisY = chartHeight - 2;
 
   return (
@@ -347,7 +384,7 @@ function Sparkline({ points, kind, unitSystem, scaleMax, meds, domain, onViewCha
         onTouchEnd={handleTouchEnd}
         onTouchCancel={handleTouchEnd}
         role="img"
-        aria-label={`Trend chart from ${fmtAxisTime(minX)} to ${fmtAxisTime(maxX)}, scale ${minY} to ${maxY}${unit}, latest value ${last.v.toFixed(1)}${unit}${staggeredMeds.length ? `. Medications in range: ${staggeredMeds.map((m) => m.label).join("; ")}` : ""}`}>
+        aria-label={`Trend chart from ${fmtAxisTime(minX)} to ${fmtAxisTime(maxX)}, scale ${minY} to ${maxY}${unit}, latest value ${last.v.toFixed(1)}${unit}${staggeredMeds.length ? `. Medications in range: ${staggeredMeds.map(medLabel).join("; ")}` : ""}`}>
         {kind === "temperature" && (
           <rect x={chartLeft} y={scaleY(feverLine)} width={plotWidth} height={Math.max(scaleY(maxY) - scaleY(feverLine), 0)} fill={redSoft} opacity={0.5} />
         )}
@@ -385,34 +422,56 @@ function Sparkline({ points, kind, unitSystem, scaleMax, meds, domain, onViewCha
             </text>
           </g>
         ))}
-        {/* Diamonds in their own row below the plot — not circles, and not mixed in
-            with the actual data dots, so they read as clearly a different kind of
-            thing at a glance. The "Medications in view" list below the chart is the
-            reliably readable source for names/doses/times; these just mark when. */}
-        {staggeredMeds.map((m) => (
+        {/* One diamond per individual dose, colored by drug — two medications taken
+            together are still two markers, just staggered close together, never
+            merged into one. Below the plot, in their own row, so they can never be
+            confused with the actual data dots. The "Medications in view" list below
+            is the readable source for names/doses/times; these just mark when/what. */}
+        {showMedMarkers && staggeredMeds.map((m) => (
           <rect
             key={m.id}
             x={-4.5} y={-4.5} width={9} height={9} rx={1.5}
-            fill={medDark} stroke={card} strokeWidth={1.5}
+            fill={m.color} stroke={card} strokeWidth={1.5}
             transform={`translate(${m.x}, ${medBaseY + m.extraLift}) rotate(45)`}
           />
         ))}
       </svg>
 
-      {sortedMedList.length > 0 && (
-        <div style={{ marginTop: 4 }}>
+      {medsInRange.length > 0 && (
+        <div style={{ marginTop: 4, display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
           <button
             onClick={() => setShowMedList((s) => !s)}
             style={{ background: "none", border: "none", color: blue, fontSize: 11, fontWeight: 600, padding: 0, cursor: "pointer" }}
           >
-            {showMedList ? "Hide medications" : `Medications in view (${sortedMedList.length})`}
+            {showMedList ? "Hide medications" : `Medications in view (${medsInRange.length})`}
           </button>
+          <label style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11, color: inkSoft, cursor: "pointer" }}>
+            <input
+              type="checkbox"
+              checked={showMedMarkers}
+              onChange={(e) => setShowMedMarkers(e.target.checked)}
+              style={{ accentColor: blue, width: 14, height: 14 }}
+            />
+            Show on chart
+          </label>
+        </div>
+      )}
+      {medsInRange.length > 0 && (
+        <div style={{ marginTop: 4 }}>
           {showMedList && (
             <div style={{ marginTop: 6, background: paper, border: `1px solid ${border}`, borderRadius: 10, padding: "6px 8px" }}>
-              {sortedMedList.map((m) => (
-                <div key={m.id} style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 12, padding: "5px 0", borderBottom: `1px solid ${paperDark}` }}>
-                  <span style={{ color: medDark, fontWeight: 600 }}>{m.label}</span>
-                  <span style={{ color: inkSoft, flexShrink: 0 }}>{fmtTime(m.t)}</span>
+              {sortedMedList.map((g) => (
+                <div key={g.label + g.items[0].id} style={{ display: "flex", justifyContent: "space-between", gap: 10, padding: "5px 0", borderBottom: `1px solid ${paperDark}` }}>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
+                    {g.items.map((m, i) => (
+                      <span key={m.id} style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 12 }}>
+                        {i > 0 && <span style={{ color: inkSoft }}>,</span>}
+                        <span style={{ width: 8, height: 8, borderRadius: 2, background: medColorForName(m.name), display: "inline-block", flexShrink: 0 }} />
+                        <span style={{ color: ink, fontWeight: 600 }}>{medLabel(m)}</span>
+                      </span>
+                    ))}
+                  </div>
+                  <span style={{ color: inkSoft, fontSize: 12, flexShrink: 0 }}>{g.label}</span>
                 </div>
               ))}
             </div>
@@ -432,10 +491,12 @@ export default function CareLog() {
   const [trackers, setTrackers] = useState([]);
   const [entries, setEntries] = useState([]);
   const [meds, setMeds] = useState([]);
+  const [concerns, setConcerns] = useState([]); // [{id, name}] — health concerns like "Cold/Flu", "Allergies"
   const [profile, setProfile] = useState({ ageYears: "", ageMonths: "", ethnicity: "", unitSystem: "imperial" });
   const [profileDraft, setProfileDraft] = useState({ ageYears: "", ageMonths: "", ethnicity: "" });
 
   const [showSettings, setShowSettings] = useState(false);
+  const [showEmergencyResources, setShowEmergencyResources] = useState(false);
   const [showBackup, setShowBackup] = useState(false);
   const [restorePasscode, setRestorePasscode] = useState("");
   const [restoreFile, setRestoreFile] = useState(null);
@@ -447,6 +508,15 @@ export default function CareLog() {
   const [templateQuery, setTemplateQuery] = useState("");
   const [openTemplateId, setOpenTemplateId] = useState(null);
   const [selectedTrackerNames, setSelectedTrackerNames] = useState([]);
+  const [selectedConcernIds, setSelectedConcernIds] = useState([]);
+  const [newConcernName, setNewConcernName] = useState("");
+  const [dashboardViewMode, setDashboardViewMode] = useState("all"); // "all" | "byConcern"
+
+  const [customTrackerDefs, setCustomTrackerDefs] = useState([]); // [{id, name, type, scaleMax}] — reusable, not tied to any one addition
+  const [showCustomTrackerForm, setShowCustomTrackerForm] = useState(false);
+  const [customTrackerNameInput, setCustomTrackerNameInput] = useState("");
+  const [customTrackerType, setCustomTrackerType] = useState("scale");
+  const [pendingCustomTracker, setPendingCustomTracker] = useState(null); // {name, type, scaleMax, sourceCustomDefinitionId?}
 
   const [draftValues, setDraftValues] = useState({});
   const [medName, setMedName] = useState("");
@@ -481,9 +551,9 @@ export default function CareLog() {
   }, []);
 
   // ---------- Persist (encrypt + save) ----------
-  const persist = useCallback(async (nextTrackers, nextEntries, nextMeds, nextProfile) => {
+  const persist = useCallback(async (nextTrackers, nextEntries, nextMeds, nextProfile, nextConcerns, nextCustomDefs) => {
     if (!cryptoKeyRef.current) return;
-    const payload = { trackers: nextTrackers, entries: nextEntries, meds: nextMeds, profile: nextProfile };
+    const payload = { trackers: nextTrackers, entries: nextEntries, meds: nextMeds, profile: nextProfile, concerns: nextConcerns, customTrackerDefs: nextCustomDefs };
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
         const { iv, ciphertext } = await encryptJSON(cryptoKeyRef.current, payload);
@@ -507,9 +577,9 @@ export default function CareLog() {
       skippedInitialPersist.current = true;
       return;
     }
-    persist(trackers, entries, meds, profile);
+    persist(trackers, entries, meds, profile, concerns, customTrackerDefs);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [trackers, entries, meds, profile]);
+  }, [trackers, entries, meds, profile, concerns, customTrackerDefs]);
 
   // ---------- Setup (first run — create passcode) ----------
   async function handleCreatePasscode() {
@@ -551,7 +621,7 @@ export default function CareLog() {
       return;
     }
     try {
-      const { iv, ciphertext } = await encryptJSON(cryptoKeyRef.current, { trackers: [], entries: [], meds: [], profile: nextProfile });
+      const { iv, ciphertext } = await encryptJSON(cryptoKeyRef.current, { trackers: [], entries: [], meds: [], profile: nextProfile, concerns: [], customTrackerDefs: [] });
       const vault = { saltB64: saltRef.current, iterations: PBKDF2_ITERATIONS, iv, ciphertext };
       const result = await window.storage.set(STORAGE_KEY, JSON.stringify(vault), false);
       if (!result) throw new Error("storage.set returned no result");
@@ -577,6 +647,8 @@ export default function CareLog() {
       setTrackers(data.trackers || []);
       setEntries(data.entries || []);
       setMeds(data.meds || []);
+      setConcerns(data.concerns || []);
+      setCustomTrackerDefs(data.customTrackerDefs || []);
       setProfile(data.profile || { ageYears: "", ageMonths: "", ethnicity: "", unitSystem: "imperial" });
       skippedInitialPersist.current = true;
       setPasscodeInput("");
@@ -589,7 +661,7 @@ export default function CareLog() {
   // ---------- Backup export / restore ----------
   async function handleExportBackup() {
     if (!cryptoKeyRef.current) return;
-    const payload = { trackers, entries, meds, profile };
+    const payload = { trackers, entries, meds, profile, concerns, customTrackerDefs };
     const { iv, ciphertext } = await encryptJSON(cryptoKeyRef.current, payload);
     const backup = { formatVersion: 1, saltB64: saltRef.current, iterations: PBKDF2_ITERATIONS, iv, ciphertext, exportedAt: new Date().toISOString() };
     const blob = new Blob([JSON.stringify(backup)], { type: "application/json" });
@@ -618,13 +690,15 @@ export default function CareLog() {
       setTrackers(data.trackers || []);
       setEntries(data.entries || []);
       setMeds(data.meds || []);
+      setConcerns(data.concerns || []);
+      setCustomTrackerDefs(data.customTrackerDefs || []);
       setProfile(data.profile || { ageYears: "", ageMonths: "", ethnicity: "", unitSystem: "imperial" });
       skippedInitialPersist.current = true;
       setRestoreSuccess(true);
       if (isFirstRun) {
         setPhase("ready");
       } else {
-        await persist(data.trackers || [], data.entries || [], data.meds || [], data.profile || profile);
+        await persist(data.trackers || [], data.entries || [], data.meds || [], data.profile || profile, data.concerns || [], data.customTrackerDefs || []);
         setShowBackup(false);
       }
     } catch (e) {
@@ -708,6 +782,12 @@ export default function CareLog() {
     );
   }, [templateQuery]);
 
+  const filteredCustomDefs = useMemo(() => {
+    const q = templateQuery.trim().toLowerCase();
+    if (!q) return customTrackerDefs;
+    return customTrackerDefs.filter((d) => d.name.toLowerCase().includes(q));
+  }, [templateQuery, customTrackerDefs]);
+
   function trackerSeries(trackerId) {
     return entries
       .filter((e) => e.values[trackerId] != null && typeof e.values[trackerId] !== "boolean")
@@ -759,6 +839,11 @@ export default function CareLog() {
     if (!t) return;
     const preselect = t.trackers.slice(0, Math.max(remainingSlots, 0)).map((tr) => tr.name);
     setSelectedTrackerNames(preselect);
+    // If a concern already exists with this template's name, suggest attaching to it
+    // instead of silently creating a duplicate; otherwise suggest creating a new one.
+    const existingMatch = concerns.find((c) => c.name.toLowerCase() === t.label.toLowerCase());
+    setSelectedConcernIds(existingMatch ? [existingMatch.id] : []);
+    setNewConcernName(existingMatch ? "" : t.label);
     setOpenTemplateId(id);
   }
 
@@ -766,11 +851,39 @@ export default function CareLog() {
     setSelectedTrackerNames((prev) => (prev.includes(name) ? prev.filter((n) => n !== name) : [...prev, name]));
   }
 
+  function toggleConcernSelection(id) {
+    setSelectedConcernIds((prev) => (prev.includes(id) ? prev.filter((c) => c !== id) : [...prev, id]));
+  }
+
+  // Shared by both the template-add flow and the custom-tracker flow — resolves the
+  // selected/typed concerns into a final id list, creating a new Concern only if the
+  // typed name doesn't match one that already exists.
+  function resolveConcernIds() {
+    let finalConcernIds = [...selectedConcernIds];
+    const trimmedNew = newConcernName.trim();
+    if (trimmedNew) {
+      const existing = concerns.find((c) => c.name.toLowerCase() === trimmedNew.toLowerCase());
+      if (existing) {
+        if (!finalConcernIds.includes(existing.id)) finalConcernIds.push(existing.id);
+      } else {
+        const newConcern = { id: uid(), name: trimmedNew };
+        setConcerns((prev) => [...prev, newConcern]);
+        finalConcernIds.push(newConcern.id);
+      }
+    }
+    return finalConcernIds;
+  }
+
   function addSelectedTrackers() {
     const template = TEMPLATES.find((t) => t.id === openTemplateId);
     if (!template) return;
     const toAdd = template.trackers.filter((tr) => selectedTrackerNames.includes(tr.name));
     if (toAdd.length === 0 || toAdd.length > remainingSlots) return;
+
+    // A tracker can end up tagged with multiple concerns — that's the point, since a
+    // symptom like a cough can genuinely belong to more than one thing at once.
+    const finalConcernIds = resolveConcernIds();
+
     const newTrackers = toAdd.map((tr) => ({
       id: uid(),
       name: tr.name,
@@ -778,11 +891,76 @@ export default function CareLog() {
       unit: tr.unit,
       scaleMax: tr.scaleMax || 5,
       sourceTemplateId: template.id,
+      concernIds: finalConcernIds,
       archived: false,
     }));
     setTrackers((prev) => [...prev, ...newTrackers]);
     setOpenTemplateId(null);
     setSelectedTrackerNames([]);
+    setSelectedConcernIds([]);
+    setNewConcernName("");
+    setTemplateQuery("");
+    setView("dashboard");
+  }
+
+  // ---------- Custom tracker flow ----------
+  function startCustomTrackerFlow(prefillName) {
+    setCustomTrackerNameInput(prefillName || "");
+    setCustomTrackerType("scale");
+    setShowCustomTrackerForm(true);
+  }
+
+  function cancelCustomTrackerForm() {
+    setShowCustomTrackerForm(false);
+    setCustomTrackerNameInput("");
+  }
+
+  function confirmCustomTrackerDetails() {
+    const name = customTrackerNameInput.trim();
+    if (!name) return;
+    const existingMatch = concerns.find((c) => c.name.toLowerCase() === name.toLowerCase());
+    setSelectedConcernIds(existingMatch ? [existingMatch.id] : []);
+    setNewConcernName("");
+    setPendingCustomTracker({ name, type: customTrackerType, scaleMax: 5 });
+    setShowCustomTrackerForm(false);
+  }
+
+  function selectExistingCustomDef(def) {
+    setSelectedConcernIds([]);
+    setNewConcernName("");
+    setPendingCustomTracker({ name: def.name, type: def.type, scaleMax: def.scaleMax, sourceCustomDefinitionId: def.id });
+  }
+
+  function cancelPendingCustomTracker() {
+    setPendingCustomTracker(null);
+    setSelectedConcernIds([]);
+    setNewConcernName("");
+  }
+
+  function addPendingCustomTracker() {
+    if (!pendingCustomTracker || remainingSlots <= 0) return;
+    const finalConcernIds = resolveConcernIds();
+
+    let defId = pendingCustomTracker.sourceCustomDefinitionId;
+    if (!defId) {
+      const newDef = { id: uid(), name: pendingCustomTracker.name, type: pendingCustomTracker.type, scaleMax: pendingCustomTracker.scaleMax };
+      setCustomTrackerDefs((prev) => [...prev, newDef]);
+      defId = newDef.id;
+    }
+
+    const newTracker = {
+      id: uid(),
+      name: pendingCustomTracker.name,
+      type: pendingCustomTracker.type,
+      scaleMax: pendingCustomTracker.scaleMax,
+      sourceCustomDefinitionId: defId,
+      concernIds: finalConcernIds,
+      archived: false,
+    };
+    setTrackers((prev) => [...prev, newTracker]);
+    setPendingCustomTracker(null);
+    setSelectedConcernIds([]);
+    setNewConcernName("");
     setTemplateQuery("");
     setView("dashboard");
   }
@@ -957,13 +1135,30 @@ export default function CareLog() {
     <div style={{ background: paper, minHeight: "100vh", color: ink }}>
       <GlobalStyle />
       <div style={{ maxWidth: 560, margin: "0 auto", padding: "20px 16px 80px" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 18 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 18, flexWrap: "wrap", gap: 8 }}>
           <h1 style={{ fontSize: 26, fontWeight: 700, margin: 0, fontFamily: "Georgia, serif" }}>Care Log</h1>
-          <div style={{ display: "flex", gap: 4 }}>
+          <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+            <button
+              onClick={() => setShowEmergencyResources((s) => !s)}
+              style={{ ...linkBtnSmall, color: red, borderColor: red, fontWeight: 700 }}
+            >
+              Emergency Resources
+            </button>
             <button style={linkBtnSmall} onClick={() => setShowSettings((s) => !s)}>Units</button>
             <button style={linkBtnSmall} onClick={() => setShowBackup((s) => !s)}>Backup</button>
           </div>
         </div>
+
+        {showEmergencyResources && (
+          <div style={{ background: redSoft, border: `1px solid ${red}`, borderRadius: 14, padding: 14, marginBottom: 18 }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: red, marginBottom: 6 }}>Emergency Resources</div>
+            <p style={{ fontSize: 13, color: ink, margin: 0 }}>
+              This section is a placeholder — real resource information (crisis lines, poison control,
+              and other emergency contacts) hasn't been added yet. Care Log is symptom-tracking software,
+              not an emergency or crisis service; in an actual emergency, contact local emergency services directly.
+            </p>
+          </div>
+        )}
 
         {showSettings && (
           <div style={{ background: card, border: `1px solid ${border}`, borderRadius: 14, padding: 14, marginBottom: 16 }}>
@@ -1022,7 +1217,25 @@ export default function CareLog() {
             selectedTrackerNames={selectedTrackerNames}
             toggleTrackerSelection={toggleTrackerSelection}
             addSelectedTrackers={addSelectedTrackers}
-            onClose={() => { setView("dashboard"); setOpenTemplateId(null); setTemplateQuery(""); }}
+            onClose={() => { setView("dashboard"); setOpenTemplateId(null); setTemplateQuery(""); cancelCustomTrackerForm(); cancelPendingCustomTracker(); }}
+            concerns={concerns}
+            selectedConcernIds={selectedConcernIds}
+            toggleConcernSelection={toggleConcernSelection}
+            newConcernName={newConcernName}
+            setNewConcernName={setNewConcernName}
+            customDefs={filteredCustomDefs}
+            selectExistingCustomDef={selectExistingCustomDef}
+            showCustomTrackerForm={showCustomTrackerForm}
+            startCustomTrackerFlow={startCustomTrackerFlow}
+            cancelCustomTrackerForm={cancelCustomTrackerForm}
+            customTrackerNameInput={customTrackerNameInput}
+            setCustomTrackerNameInput={setCustomTrackerNameInput}
+            customTrackerType={customTrackerType}
+            setCustomTrackerType={setCustomTrackerType}
+            confirmCustomTrackerDetails={confirmCustomTrackerDetails}
+            pendingCustomTracker={pendingCustomTracker}
+            cancelPendingCustomTracker={cancelPendingCustomTracker}
+            addPendingCustomTracker={addPendingCustomTracker}
           />
         ) : activeTrackers.length === 0 ? (
           // First-run / zero-active-trackers state: nothing but the one action.
@@ -1059,25 +1272,80 @@ export default function CareLog() {
                 )}
               </div>
             )}
-            {activeTrackers.map((t) => (
-              <TrackerCard
-                key={t.id}
-                tracker={t}
-                series={trackerSeries(t.id)}
-                latest={latestEntryFor(t.id)}
-                history={entriesForTracker(t.id)}
-                unitSystem={profile.unitSystem}
-                meds={meds}
-                domain={chartDomain}
-                onViewChange={handleViewChange}
-                draftValue={draftValues[t.id]}
-                onDraftChange={(v) => setDraftValues((d) => ({ ...d, [t.id]: v }))}
-                onLog={(v, atTime) => logValue(t.id, v, t.type === "temperature", atTime)}
-                onArchive={() => archiveTracker(t.id)}
-                onUpdateEntry={(entryId, newValue, newTime) => updateEntryValue(entryId, t.id, newValue, newTime)}
-                onDeleteEntry={(entryId) => deleteEntryValue(entryId, t.id)}
-              />
-            ))}
+
+            {(() => {
+              const renderCard = (t, keySuffix) => (
+                <TrackerCard
+                  key={`${t.id}-${keySuffix}`}
+                  tracker={t}
+                  series={trackerSeries(t.id)}
+                  latest={latestEntryFor(t.id)}
+                  history={entriesForTracker(t.id)}
+                  unitSystem={profile.unitSystem}
+                  meds={meds}
+                  domain={chartDomain}
+                  onViewChange={handleViewChange}
+                  draftValue={draftValues[t.id]}
+                  onDraftChange={(v) => setDraftValues((d) => ({ ...d, [t.id]: v }))}
+                  onLog={(v, atTime) => logValue(t.id, v, t.type === "temperature", atTime)}
+                  onArchive={() => archiveTracker(t.id)}
+                  onUpdateEntry={(entryId, newValue, newTime) => updateEntryValue(entryId, t.id, newValue, newTime)}
+                  onDeleteEntry={(entryId) => deleteEntryValue(entryId, t.id)}
+                />
+              );
+
+              const concernGroups = concerns
+                .map((c) => ({ ...c, trackers: activeTrackers.filter((t) => (t.concernIds || []).includes(c.id)) }))
+                .filter((g) => g.trackers.length > 0);
+              const ungrouped = activeTrackers.filter((t) => !(t.concernIds || []).length);
+
+              if (concernGroups.length === 0) {
+                // No concerns in use yet — the toggle would be pointless, just show the flat list.
+                return activeTrackers.map((t) => renderCard(t, "flat"));
+              }
+
+              return (
+                <>
+                  <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+                    <button
+                      onClick={() => setDashboardViewMode("all")}
+                      style={{ ...toggleBtn, padding: "6px 12px", fontSize: 12, ...(dashboardViewMode === "all" ? toggleBtnActive : {}) }}
+                    >
+                      All
+                    </button>
+                    <button
+                      onClick={() => setDashboardViewMode("byConcern")}
+                      style={{ ...toggleBtn, padding: "6px 12px", fontSize: 12, ...(dashboardViewMode === "byConcern" ? toggleBtnActive : {}) }}
+                    >
+                      By health concern
+                    </button>
+                  </div>
+
+                  {dashboardViewMode === "all"
+                    ? activeTrackers.map((t) => renderCard(t, "flat"))
+                    : (
+                      <>
+                        {concernGroups.map((g) => (
+                          <div key={g.id} style={{ marginBottom: 16 }}>
+                            <div style={{ fontSize: 14, fontWeight: 700, color: inkSoft, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 8 }}>
+                              {g.name}
+                            </div>
+                            {g.trackers.map((t) => renderCard(t, g.id))}
+                          </div>
+                        ))}
+                        {ungrouped.length > 0 && (
+                          <div>
+                            <div style={{ fontSize: 14, fontWeight: 700, color: inkSoft, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 8 }}>
+                              Other
+                            </div>
+                            {ungrouped.map((t) => renderCard(t, "other"))}
+                          </div>
+                        )}
+                      </>
+                    )}
+                </>
+              );
+            })()}
 
             <button style={secondaryTrackBtn} onClick={() => setView("templatePicker")}>
               <Plus size={18} style={{ marginRight: 6 }} /> Track a symptom
@@ -1204,6 +1472,22 @@ function TrackerCard({ tracker, series, latest, history, unitSystem, meds, domai
               </button>
             </div>
           )}
+          {tracker.type === "number" && (
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <input
+                type="number"
+                inputMode="decimal"
+                step="any"
+                placeholder="0"
+                value={draftValue ?? ""}
+                onChange={(e) => onDraftChange(e.target.value === "" ? "" : parseFloat(e.target.value))}
+                style={{ ...inputStyle, width: 90 }}
+              />
+              <button style={primaryBtnSmall} onClick={() => draftValue !== undefined && draftValue !== "" && logAt(draftValue)}>
+                Log
+              </button>
+            </div>
+          )}
           {tracker.type === "scale" && (
             <div style={{ display: "flex", gap: 6 }}>
               {Array.from({ length: (tracker.scaleMax || 5) + 1 }, (_, n) => n).map((n) => (
@@ -1270,6 +1554,14 @@ function TrackerCard({ tracker, series, latest, history, unitSystem, meds, domai
                       {tracker.type === "temperature" && (
                         <input
                           type="number" inputMode="decimal" step="0.1"
+                          value={editValue ?? ""}
+                          onChange={(e) => setEditValue(e.target.value)}
+                          style={{ ...inputStyle, padding: "6px 8px", fontSize: 13, width: 90 }}
+                        />
+                      )}
+                      {tracker.type === "number" && (
+                        <input
+                          type="number" inputMode="decimal" step="any"
                           value={editValue ?? ""}
                           onChange={(e) => setEditValue(e.target.value)}
                           style={{ ...inputStyle, padding: "6px 8px", fontSize: 13, width: 90 }}
@@ -1353,9 +1645,132 @@ function TrackerCard({ tracker, series, latest, history, unitSystem, meds, domai
   );
 }
 
-function TemplatePicker({ query, setQuery, templates, remainingSlots, openTemplateId, openTemplate, selectedTrackerNames, toggleTrackerSelection, addSelectedTrackers, onClose }) {
+function ConcernPicker({ concerns, selectedConcernIds, toggleConcernSelection, newConcernName, setNewConcernName }) {
+  return (
+    <div style={{ marginTop: 14, paddingTop: 12, borderTop: `1px solid ${paperDark}` }}>
+      <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 6 }}>Health concern (optional)</div>
+      <p style={{ fontSize: 12, color: inkSoft, margin: "0 0 8px" }}>
+        Group this under a concern so you can view it together with related trackers — a symptom can belong to more than one.
+      </p>
+      {concerns.length > 0 && (
+        <div style={{ marginBottom: 8 }}>
+          {concerns.map((c) => (
+            <label key={c.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 2px", cursor: "pointer" }}>
+              <input
+                type="checkbox"
+                checked={selectedConcernIds.includes(c.id)}
+                onChange={() => toggleConcernSelection(c.id)}
+                style={{ width: 18, height: 18, accentColor: teal }}
+              />
+              <span style={{ fontSize: 14 }}>{c.name}</span>
+            </label>
+          ))}
+        </div>
+      )}
+      <input
+        placeholder="New concern, e.g. Cold / Flu"
+        value={newConcernName}
+        onChange={(e) => setNewConcernName(e.target.value)}
+        style={{ ...inputStyle, fontSize: 13, padding: "8px 10px" }}
+      />
+    </div>
+  );
+}
+
+function TemplatePicker({
+  query, setQuery, templates, remainingSlots, openTemplateId, openTemplate, selectedTrackerNames, toggleTrackerSelection, addSelectedTrackers, onClose,
+  concerns, selectedConcernIds, toggleConcernSelection, newConcernName, setNewConcernName,
+  customDefs, selectExistingCustomDef,
+  showCustomTrackerForm, startCustomTrackerFlow, cancelCustomTrackerForm,
+  customTrackerNameInput, setCustomTrackerNameInput, customTrackerType, setCustomTrackerType, confirmCustomTrackerDetails,
+  pendingCustomTracker, cancelPendingCustomTracker, addPendingCustomTracker,
+}) {
   const activeTemplate = templates.find((t) => t.id === openTemplateId) || TEMPLATES.find((t) => t.id === openTemplateId);
 
+  // ---------- Custom tracker: name + type form ----------
+  if (showCustomTrackerForm) {
+    const TYPE_OPTIONS = [
+      { key: "scale", label: "Rate severity (0–5)" },
+      { key: "boolean", label: "Yes / No" },
+      { key: "number", label: "Number" },
+    ];
+    return (
+      <div style={{ background: card, border: `1px solid ${border}`, borderRadius: 16, padding: 16 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+          <button aria-label="Back" style={iconBtn} onClick={cancelCustomTrackerForm}>
+            <ChevronLeft size={20} />
+          </button>
+          <div style={{ fontSize: 18, fontWeight: 700 }}>Custom symptom</div>
+        </div>
+        <div style={{ marginTop: 12 }}>
+          <label style={{ fontSize: 13, fontWeight: 700, display: "block", marginBottom: 6 }}>Name</label>
+          <input
+            placeholder="e.g. Joint pain"
+            value={customTrackerNameInput}
+            onChange={(e) => setCustomTrackerNameInput(e.target.value)}
+            style={{ ...inputStyle, marginBottom: 14 }}
+            autoFocus
+          />
+          <label style={{ fontSize: 13, fontWeight: 700, display: "block", marginBottom: 6 }}>How should this be logged?</label>
+          {TYPE_OPTIONS.map((opt) => (
+            <label key={opt.key} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 4px", borderBottom: `1px solid ${paperDark}`, cursor: "pointer" }}>
+              <input
+                type="radio"
+                name="customTrackerType"
+                checked={customTrackerType === opt.key}
+                onChange={() => setCustomTrackerType(opt.key)}
+                style={{ width: 18, height: 18, accentColor: teal }}
+              />
+              <span style={{ fontSize: 15 }}>{opt.label}</span>
+            </label>
+          ))}
+        </div>
+        <button
+          style={{ ...primaryBtn, marginTop: 16, opacity: customTrackerNameInput.trim() ? 1 : 0.5 }}
+          disabled={!customTrackerNameInput.trim()}
+          onClick={confirmCustomTrackerDetails}
+        >
+          Continue
+        </button>
+      </div>
+    );
+  }
+
+  // ---------- Custom tracker (new or reused): concern step + add ----------
+  if (pendingCustomTracker) {
+    const overLimit = remainingSlots <= 0;
+    return (
+      <div style={{ background: card, border: `1px solid ${border}`, borderRadius: 16, padding: 16 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+          <button aria-label="Back" style={iconBtn} onClick={cancelPendingCustomTracker}>
+            <ChevronLeft size={20} />
+          </button>
+          <div style={{ fontSize: 18, fontWeight: 700 }}>{pendingCustomTracker.name}</div>
+        </div>
+        <ConcernPicker
+          concerns={concerns}
+          selectedConcernIds={selectedConcernIds}
+          toggleConcernSelection={toggleConcernSelection}
+          newConcernName={newConcernName}
+          setNewConcernName={setNewConcernName}
+        />
+        {overLimit && (
+          <div style={{ ...errorStyle, marginTop: 10 }}>
+            You've reached the free plan's {MAX_TRACKERS}-tracker limit. Archive an existing tracker to add a new one.
+          </div>
+        )}
+        <button
+          style={{ ...primaryBtn, marginTop: 14, opacity: overLimit ? 0.5 : 1 }}
+          disabled={overLimit}
+          onClick={addPendingCustomTracker}
+        >
+          Add tracker
+        </button>
+      </div>
+    );
+  }
+
+  // ---------- Official template: tracker checklist + concern step ----------
   if (openTemplateId && activeTemplate) {
     const overLimit = selectedTrackerNames.length > remainingSlots;
     return (
@@ -1376,6 +1791,15 @@ function TemplatePicker({ query, setQuery, templates, remainingSlots, openTempla
             </label>
           );
         })}
+
+        <ConcernPicker
+          concerns={concerns}
+          selectedConcernIds={selectedConcernIds}
+          toggleConcernSelection={toggleConcernSelection}
+          newConcernName={newConcernName}
+          setNewConcernName={setNewConcernName}
+        />
+
         {overLimit && (
           <div style={{ ...errorStyle, marginTop: 10 }}>
             Free plan: {remainingSlots} tracker{remainingSlots === 1 ? "" : "s"} available — uncheck one to continue.
@@ -1383,7 +1807,7 @@ function TemplatePicker({ query, setQuery, templates, remainingSlots, openTempla
         )}
         {remainingSlots === 0 && (
           <div style={{ ...errorStyle, marginTop: 10 }}>
-            You've reached the free plan's 3-tracker limit. Archive an existing tracker to add a new one.
+            You've reached the free plan's {MAX_TRACKERS}-tracker limit. Archive an existing tracker to add a new one.
           </div>
         )}
         <button
@@ -1397,6 +1821,8 @@ function TemplatePicker({ query, setQuery, templates, remainingSlots, openTempla
     );
   }
 
+  // ---------- Browse: search, "Your trackers", official templates, add-custom ----------
+  const noMatches = templates.length === 0 && customDefs.length === 0;
   return (
     <div>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
@@ -1415,13 +1841,46 @@ function TemplatePicker({ query, setQuery, templates, remainingSlots, openTempla
           autoFocus
         />
       </div>
+
+      {customDefs.length > 0 && (
+        <>
+          <div style={{ fontSize: 12, fontWeight: 700, color: inkSoft, textTransform: "uppercase", letterSpacing: 0.4, margin: "0 0 8px" }}>
+            Your trackers
+          </div>
+          {customDefs.map((d) => (
+            <button key={d.id} style={templateRow} onClick={() => selectExistingCustomDef(d)}>
+              <div style={{ fontSize: 15, fontWeight: 700 }}>{d.name}</div>
+              <div style={{ fontSize: 12, color: inkSoft, marginTop: 2 }}>
+                {d.type === "scale" ? `Severity 0–${d.scaleMax || 5}` : d.type === "boolean" ? "Yes / No" : "Number"}
+              </div>
+            </button>
+          ))}
+          <div style={{ fontSize: 12, fontWeight: 700, color: inkSoft, textTransform: "uppercase", letterSpacing: 0.4, margin: "14px 0 8px" }}>
+            Illness templates
+          </div>
+        </>
+      )}
+
       {templates.map((t) => (
         <button key={t.id} style={templateRow} onClick={() => openTemplate(t.id)}>
           <div style={{ fontSize: 15, fontWeight: 700 }}>{t.label}</div>
           <div style={{ fontSize: 12, color: inkSoft, marginTop: 2 }}>{t.description}</div>
         </button>
       ))}
-      {templates.length === 0 && <div style={{ fontSize: 13, color: inkSoft, padding: "10px 4px" }}>No matches — try a different word.</div>}
+
+      {noMatches && query.trim() ? (
+        <button style={templateRow} onClick={() => startCustomTrackerFlow(query.trim())}>
+          <div style={{ fontSize: 15, fontWeight: 700, color: blue }}>No matches for "{query.trim()}"</div>
+          <div style={{ fontSize: 12, color: inkSoft, marginTop: 2 }}>Track it as a custom symptom instead</div>
+        </button>
+      ) : (
+        <button
+          onClick={() => startCustomTrackerFlow("")}
+          style={{ ...linkBtn, marginTop: 10, background: "none", textAlign: "center" }}
+        >
+          Don't see it? Add a custom symptom
+        </button>
+      )}
     </div>
   );
 }

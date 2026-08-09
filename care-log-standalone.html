@@ -250,7 +250,7 @@ function medLabel(m) {
 }
 // Deterministic color per medication name — same drug always gets the same color,
 // across sessions and re-renders, without needing to track any assignment order.
-const MED_COLOR_PALETTE = ["#33506E", "#7D5BA6", "#B5654A", "#3F7A5E", "#C2703D", "#5C7A99", "#8A6D3B", "#6B4C6E", "#4A7A8C", "#9C5B7D"];
+const MED_COLOR_PALETTE = ["#2563EB", "#9333EA", "#D97706", "#16A34A", "#DB2777", "#4F46E5", "#0D9488", "#EA580C", "#C026D3", "#65A30D"];
 function medColorForName(name) {
   const key = (name || "").trim().toLowerCase();
   // FNV-1a — the previous simple polynomial hash (hash*31+char) distributes poorly
