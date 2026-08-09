@@ -34,7 +34,7 @@ jobs:
       - name: Run Semgrep
         run: semgrep ci --config auto --json --output semgrep-results.json
         continue-on-error: true
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: semgrep-report
           path: semgrep-results.json
@@ -51,7 +51,7 @@ jobs:
       - name: Audit dependencies
         run: npm audit --audit-level=moderate --json > npm-audit-report.json
         continue-on-error: true
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: npm-audit-report
           path: npm-audit-report.json
@@ -79,7 +79,7 @@ jobs:
           echo '```' >> summary.md
           cat reports/npm-audit-report/npm-audit-report.json >> summary.md || echo "no findings file" >> summary.md
           echo '```' >> summary.md
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: weekly-security-summary
           path: summary.md
