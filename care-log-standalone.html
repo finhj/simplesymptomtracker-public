@@ -278,6 +278,13 @@ function Sparkline({ points, kind, unitSystem, scaleMax, meds, domain, onViewCha
   const d = display.map((p, i) => `${i === 0 ? "M" : "L"} ${scaleX(p.t).toFixed(1)} ${scaleY(p.v).toFixed(1)}`).join(" ");
   const last = display[display.length - 1];
   const axisLabelStyle = { fontSize: 9, fill: inkSoft, fontFamily: "-apple-system, sans-serif" };
+  const span = maxX - minX;
+  function fmtAxisTime(t) {
+    const dt = new Date(t);
+    return span <= 48 * 3600 * 1000
+      ? dt.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })
+      : dt.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  }
 
   // ---------- Pinch-to-zoom / drag-to-pan ----------
   // Uses refs (not state) to track an in-progress gesture so intermediate touchmove
@@ -358,9 +365,11 @@ function Sparkline({ points, kind, unitSystem, scaleMax, meds, domain, onViewCha
     lastX = x;
     return { ...g, x, extraLift: stagger * 6 };
   });
-  const chartHeight = staggeredMeds.length ? height + 10 + Math.max(...staggeredMeds.map((m) => m.extraLift), 0) : height;
+  const AXIS_ROW_HEIGHT = 14;
+  const chartHeight = (staggeredMeds.length ? height + 10 + Math.max(...staggeredMeds.map((m) => m.extraLift), 0) : height) + AXIS_ROW_HEIGHT;
   const medDark = "#33506E"; // darker than the standard blue accent, for better contrast at small sizes
   const sortedMedList = [...staggeredMeds].sort((a, b) => a.t - b.t);
+  const xAxisY = chartHeight - 2;
 
   return (
     <div>
@@ -374,7 +383,7 @@ function Sparkline({ points, kind, unitSystem, scaleMax, meds, domain, onViewCha
         onTouchEnd={handleTouchEnd}
         onTouchCancel={handleTouchEnd}
         role="img"
-        aria-label={`Trend chart, scale ${minY} to ${maxY}${unit}, latest value ${last.v.toFixed(1)}${unit}${staggeredMeds.length ? `. Medications in range: ${staggeredMeds.map((m) => m.label).join("; ")}` : ""}`}>
+        aria-label={`Trend chart from ${fmtAxisTime(minX)} to ${fmtAxisTime(maxX)}, scale ${minY} to ${maxY}${unit}, latest value ${last.v.toFixed(1)}${unit}${staggeredMeds.length ? `. Medications in range: ${staggeredMeds.map((m) => m.label).join("; ")}` : ""}`}>
         {kind === "temperature" && (
           <rect x={chartLeft} y={scaleY(feverLine)} width={plotWidth} height={Math.max(scaleY(maxY) - scaleY(feverLine), 0)} fill={redSoft} opacity={0.5} />
         )}
@@ -384,6 +393,8 @@ function Sparkline({ points, kind, unitSystem, scaleMax, meds, domain, onViewCha
           <text x={0} y={scaleY(feverLine) + 3} style={{ ...axisLabelStyle, fill: red, fontWeight: 700 }}>{feverLine.toFixed(1)}</text>
         )}
         <line x1={chartLeft} y1={pad} x2={chartLeft} y2={height - pad} stroke={border} strokeWidth={1} />
+        <text x={chartLeft} y={xAxisY} textAnchor="start" style={axisLabelStyle}>{fmtAxisTime(minX)}</text>
+        <text x={width} y={xAxisY} textAnchor="end" style={axisLabelStyle}>{fmtAxisTime(maxX)}</text>
         <path d={d} fill="none" stroke={ink} strokeWidth={1.5} />
         {display.map((p, i) => (
           <circle key={i} cx={scaleX(p.t)} cy={scaleY(p.v)} r={2.5} fill={kind === "temperature" && p.v >= feverLine ? red : teal} />
