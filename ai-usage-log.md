@@ -44,6 +44,7 @@ the actual writing is the user's.
 | 2026-08-08 | Log catch-up + process fix | Process | Caught up `ai-usage-log.md` and `decisions-log.md` after a gap; added an explicit per-turn logging rule (see below) so this doesn't recur |
 | 2026-08-08 | Health concern grouping | Code | New `concerns` entity (many-to-many with trackers via `concernIds`) — trackers can belong to multiple concerns at once (e.g. a cough tagged to both "Cold/Flu" and "Allergies"). Concern selection added to the template-add flow; dashboard gets an "All / By health concern" toggle, with concern sections and an "Other" section for untagged trackers |
 | 2026-08-08 | Per-dose colored medication markers | Code | Fixed: chart previously merged same-time doses into one marker/count; now each dose gets its own diamond (never merged), colored deterministically per drug name via a hash-based palette lookup, and the "Medications in view" count reflects actual doses, not time-groups. Grouped-by-time display kept only for the readable list, with colored swatches added so list entries visually match their chart diamond |
+| 2026-08-08 | Medication color collision fix | Debug/Code | User reported 3 different drugs showing the same diamond color; root cause was a weak hash (`hash*31+char`) that distributes poorly when reduced mod a small power-of-two palette size (31 ≡ -1 mod 8). Replaced with FNV-1a and expanded the palette 8→10 colors; verified via an independent Python simulation that the three reported drug names now map to distinct colors before shipping |
 
 ---
 
