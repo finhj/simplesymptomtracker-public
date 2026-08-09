@@ -1,6 +1,6 @@
 // Care Log service worker — caches the app shell so it works offline after first load.
 // Bump CACHE_NAME when the app changes so old caches get cleared out.
-const CACHE_NAME = "care-log-shell-v2";
+const CACHE_NAME = "care-log-shell-v3";
 const APP_SHELL = [
   "./care-log-standalone.html",
   "./manifest.json",
@@ -31,22 +31,22 @@ self.addEventListener("activate", (event) => {
   self.clients.claim();
 });
 
-// Cache-first: serve from cache when available (fast, works offline), fall back to
-// network, and quietly update the cache in the background when online.
+// Network-first: always try to fetch the current version first, so an update is
+// visible on the very next load rather than needing two reloads (fetch-then-cache,
+// then a second visit to actually see the cached copy — the previous cache-first
+// strategy had exactly that problem). Only falls back to the cache when the network
+// request fails, which is what gives this offline support.
 self.addEventListener("fetch", (event) => {
   if (event.request.method !== "GET") return;
   event.respondWith(
-    caches.match(event.request).then((cached) => {
-      const networkFetch = fetch(event.request)
-        .then((response) => {
-          if (response && response.status === 200) {
-            const clone = response.clone();
-            caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
-          }
-          return response;
-        })
-        .catch(() => cached); // offline and not cached — nothing more we can do
-      return cached || networkFetch;
-    })
+    fetch(event.request)
+      .then((response) => {
+        if (response && response.status === 200) {
+          const clone = response.clone();
+          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
+        }
+        return response;
+      })
+      .catch(() => caches.match(event.request))
   );
 });
