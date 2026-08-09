@@ -353,9 +353,11 @@ function Sparkline({ points, kind, unitSystem, scaleMax, meds, domain, onViewCha
     t: g.items[0].t,
     id: g.items[0].id,
   }));
-  const baseY = height - pad;
-  // No more on-chart text labels (see below) — a light stagger still keeps bullets
-  // from landing exactly on top of each other when times are close but not identical.
+  // Medication markers get their own row below the plot, not inside the
+  // temperature/value range — this keeps them visually distinct from real data
+  // points regardless of how low a reading happens to be.
+  const MED_ROW_GAP = 10;
+  const medBaseY = height + MED_ROW_GAP;
   const MIN_MARKER_GAP_PX = 14;
   let lastX = -Infinity;
   let stagger = 0;
@@ -363,7 +365,7 @@ function Sparkline({ points, kind, unitSystem, scaleMax, meds, domain, onViewCha
     const x = scaleX(g.t);
     stagger = x - lastX < MIN_MARKER_GAP_PX ? stagger + 1 : 0;
     lastX = x;
-    return { ...g, x, extraLift: stagger * 6 };
+    return { ...g, x, extraLift: stagger * 7 };
   });
   // Bounded label set so the chart stays clean at every zoom level, not just some of
   // them. When there's room, label every point. When zoomed out to many points, don't
@@ -395,7 +397,8 @@ function Sparkline({ points, kind, unitSystem, scaleMax, meds, domain, onViewCha
   }
 
   const AXIS_ROW_HEIGHT = 14;
-  const chartHeight = (staggeredMeds.length ? height + 10 + Math.max(...staggeredMeds.map((m) => m.extraLift), 0) : height) + AXIS_ROW_HEIGHT;
+  const medRowHeight = staggeredMeds.length ? MED_ROW_GAP + 8 + Math.max(...staggeredMeds.map((m) => m.extraLift), 0) : 0;
+  const chartHeight = height + medRowHeight + AXIS_ROW_HEIGHT;
   const medDark = "#33506E"; // darker than the standard blue accent, for better contrast at small sizes
   const sortedMedList = [...staggeredMeds].sort((a, b) => a.t - b.t);
   const xAxisY = chartHeight - 2;
@@ -450,12 +453,17 @@ function Sparkline({ points, kind, unitSystem, scaleMax, meds, domain, onViewCha
             </text>
           </g>
         ))}
-        {/* Bullets only — no on-chart text. Cut-off, overlapping, and hard-to-read
-            labels were all symptoms of trying to render full names diagonally in a
-            260px-wide chart. The "Medications in view" list below is now the single,
+        {/* Diamonds in their own row below the plot — not circles, and not mixed in
+            with the actual data dots, so they read as clearly a different kind of
+            thing at a glance. The "Medications in view" list below the chart is the
             reliably readable source for names/doses/times; these just mark when. */}
         {staggeredMeds.map((m) => (
-          <circle key={m.id} cx={m.x} cy={baseY - m.extraLift} r={4} fill={medDark} stroke={card} strokeWidth={1.5} />
+          <rect
+            key={m.id}
+            x={-4.5} y={-4.5} width={9} height={9} rx={1.5}
+            fill={medDark} stroke={card} strokeWidth={1.5}
+            transform={`translate(${m.x}, ${medBaseY + m.extraLift}) rotate(45)`}
+          />
         ))}
       </svg>
 
