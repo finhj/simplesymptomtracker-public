@@ -248,6 +248,15 @@ function groupMedsByDisplayTime(sortedMeds) {
 function medLabel(m) {
   return m.name + (m.dose ? ` ${m.dose}` : "");
 }
+// Deterministic color per medication name — same drug always gets the same color,
+// across sessions and re-renders, without needing to track any assignment order.
+const MED_COLOR_PALETTE = ["#33506E", "#7D5BA6", "#B5654A", "#3F7A5E", "#A6473C", "#5C7A99", "#8A6D3B", "#6B4C6E"];
+function medColorForName(name) {
+  const key = (name || "").trim().toLowerCase();
+  let hash = 0;
+  for (let i = 0; i < key.length; i++) hash = (hash * 31 + key.charCodeAt(i)) >>> 0;
+  return MED_COLOR_PALETTE[hash % MED_COLOR_PALETTE.length];
+}
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
@@ -348,6 +357,12 @@ function Sparkline({ points, kind, unitSystem, scaleMax, meds, domain, onViewCha
     .map((m) => ({ ...m, t: new Date(m.timestamp).getTime() }))
     .filter((m) => m.t >= minX - medPad && m.t <= maxX + medPad)
     .sort((a, b) => a.t - b.t);
+  // Chart markers: one diamond per individual dose, never merged — two drugs taken
+  // together are still two separate doses and get two separate, differently-colored
+  // markers, even though they're staggered close together for visibility. The
+  // grouped/combined version (chartMedGroups below) is only used for the readable
+  // tap-to-expand list, where combining same-time doses onto one line is purely a
+  // display convenience, not a change to the underlying data.
   const chartMedGroups = groupMedsByDisplayTime(medsInRange).map((g) => ({
     label: g.items.map(medLabel).join(", "),
     t: g.items[0].t,
@@ -361,11 +376,11 @@ function Sparkline({ points, kind, unitSystem, scaleMax, meds, domain, onViewCha
   const MIN_MARKER_GAP_PX = 14;
   let lastX = -Infinity;
   let stagger = 0;
-  const staggeredMeds = chartMedGroups.map((g) => {
-    const x = scaleX(g.t);
+  const staggeredMeds = medsInRange.map((m) => {
+    const x = scaleX(m.t);
     stagger = x - lastX < MIN_MARKER_GAP_PX ? stagger + 1 : 0;
     lastX = x;
-    return { ...g, x, extraLift: stagger * 7 };
+    return { ...m, x, extraLift: stagger * 7, color: medColorForName(m.name) };
   });
   // Bounded label set so the chart stays clean at every zoom level, not just some of
   // them. When there's room, label every point. When zoomed out to many points, don't
@@ -399,8 +414,7 @@ function Sparkline({ points, kind, unitSystem, scaleMax, meds, domain, onViewCha
   const AXIS_ROW_HEIGHT = 14;
   const medRowHeight = staggeredMeds.length ? MED_ROW_GAP + 8 + Math.max(...staggeredMeds.map((m) => m.extraLift), 0) : 0;
   const chartHeight = height + medRowHeight + AXIS_ROW_HEIGHT;
-  const medDark = "#33506E"; // darker than the standard blue accent, for better contrast at small sizes
-  const sortedMedList = [...staggeredMeds].sort((a, b) => a.t - b.t);
+  const sortedMedList = groupMedsByDisplayTime(medsInRange); // grouped-by-time, for the readable list only
   const xAxisY = chartHeight - 2;
 
   return (
@@ -415,7 +429,7 @@ function Sparkline({ points, kind, unitSystem, scaleMax, meds, domain, onViewCha
         onTouchEnd={handleTouchEnd}
         onTouchCancel={handleTouchEnd}
         role="img"
-        aria-label={`Trend chart from ${fmtAxisTime(minX)} to ${fmtAxisTime(maxX)}, scale ${minY} to ${maxY}${unit}, latest value ${last.v.toFixed(1)}${unit}${staggeredMeds.length ? `. Medications in range: ${staggeredMeds.map((m) => m.label).join("; ")}` : ""}`}>
+        aria-label={`Trend chart from ${fmtAxisTime(minX)} to ${fmtAxisTime(maxX)}, scale ${minY} to ${maxY}${unit}, latest value ${last.v.toFixed(1)}${unit}${staggeredMeds.length ? `. Medications in range: ${staggeredMeds.map(medLabel).join("; ")}` : ""}`}>
         {kind === "temperature" && (
           <rect x={chartLeft} y={scaleY(feverLine)} width={plotWidth} height={Math.max(scaleY(maxY) - scaleY(feverLine), 0)} fill={redSoft} opacity={0.5} />
         )}
@@ -453,34 +467,43 @@ function Sparkline({ points, kind, unitSystem, scaleMax, meds, domain, onViewCha
             </text>
           </g>
         ))}
-        {/* Diamonds in their own row below the plot — not circles, and not mixed in
-            with the actual data dots, so they read as clearly a different kind of
-            thing at a glance. The "Medications in view" list below the chart is the
-            reliably readable source for names/doses/times; these just mark when. */}
+        {/* One diamond per individual dose, colored by drug — two medications taken
+            together are still two markers, just staggered close together, never
+            merged into one. Below the plot, in their own row, so they can never be
+            confused with the actual data dots. The "Medications in view" list below
+            is the readable source for names/doses/times; these just mark when/what. */}
         {staggeredMeds.map((m) => (
           <rect
             key={m.id}
             x={-4.5} y={-4.5} width={9} height={9} rx={1.5}
-            fill={medDark} stroke={card} strokeWidth={1.5}
+            fill={m.color} stroke={card} strokeWidth={1.5}
             transform={`translate(${m.x}, ${medBaseY + m.extraLift}) rotate(45)`}
           />
         ))}
       </svg>
 
-      {sortedMedList.length > 0 && (
+      {medsInRange.length > 0 && (
         <div style={{ marginTop: 4 }}>
           <button
             onClick={() => setShowMedList((s) => !s)}
             style={{ background: "none", border: "none", color: blue, fontSize: 11, fontWeight: 600, padding: 0, cursor: "pointer" }}
           >
-            {showMedList ? "Hide medications" : `Medications in view (${sortedMedList.length})`}
+            {showMedList ? "Hide medications" : `Medications in view (${medsInRange.length})`}
           </button>
           {showMedList && (
             <div style={{ marginTop: 6, background: paper, border: `1px solid ${border}`, borderRadius: 10, padding: "6px 8px" }}>
-              {sortedMedList.map((m) => (
-                <div key={m.id} style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 12, padding: "5px 0", borderBottom: `1px solid ${paperDark}` }}>
-                  <span style={{ color: medDark, fontWeight: 600 }}>{m.label}</span>
-                  <span style={{ color: inkSoft, flexShrink: 0 }}>{fmtTime(m.t)}</span>
+              {sortedMedList.map((g) => (
+                <div key={g.label + g.items[0].id} style={{ display: "flex", justifyContent: "space-between", gap: 10, padding: "5px 0", borderBottom: `1px solid ${paperDark}` }}>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
+                    {g.items.map((m, i) => (
+                      <span key={m.id} style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 12 }}>
+                        {i > 0 && <span style={{ color: inkSoft }}>,</span>}
+                        <span style={{ width: 8, height: 8, borderRadius: 2, background: medColorForName(m.name), display: "inline-block", flexShrink: 0 }} />
+                        <span style={{ color: ink, fontWeight: 600 }}>{medLabel(m)}</span>
+                      </span>
+                    ))}
+                  </div>
+                  <span style={{ color: inkSoft, fontSize: 12, flexShrink: 0 }}>{g.label}</span>
                 </div>
               ))}
             </div>
