@@ -279,17 +279,18 @@ function Sparkline({ points, kind, unitSystem, scaleMax, meds, domain, onViewCha
     id: g.items[0].id,
   }));
   const baseY = height - pad;
-  // Gap and stagger sized for the larger, more-legible label font below.
-  const MIN_MARKER_GAP_PX = 40;
+  // No more on-chart text labels (see below) — a light stagger still keeps bullets
+  // from landing exactly on top of each other when times are close but not identical.
+  const MIN_MARKER_GAP_PX = 14;
   let lastX = -Infinity;
   let stagger = 0;
   const staggeredMeds = chartMedGroups.map((g) => {
     const x = scaleX(g.t);
     stagger = x - lastX < MIN_MARKER_GAP_PX ? stagger + 1 : 0;
     lastX = x;
-    return { ...g, x, extraLift: stagger * 16 };
+    return { ...g, x, extraLift: stagger * 6 };
   });
-  const chartHeight = staggeredMeds.length ? height + 30 + Math.max(...staggeredMeds.map((m) => m.extraLift), 0) : height;
+  const chartHeight = staggeredMeds.length ? height + 10 + Math.max(...staggeredMeds.map((m) => m.extraLift), 0) : height;
   const medDark = "#33506E"; // darker than the standard blue accent, for better contrast at small sizes
   const sortedMedList = [...staggeredMeds].sort((a, b) => a.t - b.t);
 
@@ -319,29 +320,12 @@ function Sparkline({ points, kind, unitSystem, scaleMax, meds, domain, onViewCha
         {display.map((p, i) => (
           <circle key={i} cx={scaleX(p.t)} cy={scaleY(p.v)} r={2.5} fill={kind === "temperature" && p.v >= feverLine ? red : teal} />
         ))}
+        {/* Bullets only — no on-chart text. Cut-off, overlapping, and hard-to-read
+            labels were all symptoms of trying to render full names diagonally in a
+            260px-wide chart. The "Medications in view" list below is now the single,
+            reliably readable source for names/doses/times; these just mark when. */}
         {staggeredMeds.map((m) => (
-          <g key={m.id}>
-            <line x1={m.x} y1={baseY} x2={m.x} y2={pad - m.extraLift} stroke={blue} strokeOpacity={0.35} strokeDasharray="2 2" />
-            <circle cx={m.x} cy={baseY} r={3} fill={medDark} stroke={card} strokeWidth={1} />
-            {/* Rendered twice: a thick pale "halo" copy first so the label stays readable
-                over the chart line or other labels behind it, then the real text on top.
-                Kept short and gently angled — the full names/doses live in the tap-to-expand
-                list below, this is just a hint of what's there and roughly when. */}
-            <text
-              x={m.x} y={baseY - m.extraLift} transform={`rotate(-20 ${m.x} ${baseY - m.extraLift})`} dx={6} dy={-4}
-              fontSize={11} fontWeight={700} fill="none" stroke={card} strokeWidth={3} strokeLinejoin="round"
-              fontFamily="-apple-system, sans-serif"
-            >
-              {m.label}
-            </text>
-            <text
-              x={m.x} y={baseY - m.extraLift} transform={`rotate(-20 ${m.x} ${baseY - m.extraLift})`} dx={6} dy={-4}
-              fontSize={11} fontWeight={700} fill={medDark}
-              fontFamily="-apple-system, sans-serif"
-            >
-              {m.label}
-            </text>
-          </g>
+          <circle key={m.id} cx={m.x} cy={baseY - m.extraLift} r={4} fill={medDark} stroke={card} strokeWidth={1.5} />
         ))}
       </svg>
 
@@ -759,6 +743,16 @@ export default function CareLog() {
     setMeds((prev) => prev.filter((m) => m.id !== id));
   }
 
+  function updateMed(id, newName, newDose, newTimeInput) {
+    setMeds((prev) =>
+      prev.map((m) =>
+        m.id === id
+          ? { ...m, name: newName, dose: newDose, timestamp: newTimeInput ? new Date(newTimeInput).toISOString() : m.timestamp }
+          : m
+      )
+    );
+  }
+
   const reportText = useMemo(() => {
     const since = new Date(Date.now() - 72 * 3600 * 1000);
     const lines = [`Care Log summary — last 72 hours`, `Generated ${new Date().toLocaleString()}`, ""];
@@ -1027,6 +1021,7 @@ export default function CareLog() {
               setMedDose={setMedDose}
               onAdd={addMedication}
               onDelete={deleteMed}
+              onUpdate={updateMed}
               catalogCount={medCatalogCount}
               knownMedNames={knownMedNames}
             />
@@ -1361,12 +1356,35 @@ function TemplatePicker({ query, setQuery, templates, remainingSlots, openTempla
   );
 }
 
-function MedicationSection({ meds, medName, setMedName, medDose, setMedDose, onAdd, onDelete, catalogCount, knownMedNames }) {
+function MedicationSection({ meds, medName, setMedName, medDose, setMedDose, onAdd, onDelete, onUpdate, catalogCount, knownMedNames }) {
   const sorted = [...meds].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp)).slice(0, 6);
   const grouped = groupMedsByDisplayTime(sorted);
   const isNewDistinct = medName.trim() && !knownMedNames.includes(medName.trim().toLowerCase());
   const atCap = isNewDistinct && catalogCount >= MAX_MEDICATIONS;
   const [customTime, setCustomTime] = useState(null); // null = log at "now" (the fast default)
+  const [editingMedId, setEditingMedId] = useState(null);
+  const [editName, setEditName] = useState("");
+  const [editDose, setEditDose] = useState("");
+  const [editTime, setEditTime] = useState("");
+
+  function startEdit(m) {
+    setEditingMedId(m.id);
+    setEditName(m.name);
+    setEditDose(m.dose || "");
+    setEditTime(isoToLocalInput(m.timestamp));
+  }
+  function cancelEdit() {
+    setEditingMedId(null);
+    setEditName("");
+    setEditDose("");
+    setEditTime("");
+  }
+  function saveEdit() {
+    if (!editName.trim()) return;
+    onUpdate(editingMedId, editName.trim(), editDose.trim(), editTime);
+    cancelEdit();
+  }
+
   return (
     <div style={{ background: card, border: `1px solid ${border}`, borderRadius: 16, padding: 14, marginTop: 20, marginBottom: 16 }}>
       <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 10 }}>Medications</div>
@@ -1410,15 +1428,39 @@ function MedicationSection({ meds, medName, setMedName, medDose, setMedDose, onA
             <div key={g.label + g.items[0].id} style={{ padding: "6px 0" }}>
               <div style={{ color: inkSoft, fontSize: 12, marginBottom: 2 }}>{g.label}</div>
               <div style={{ display: "flex", flexWrap: "wrap", gap: 4, alignItems: "center" }}>
-                {g.items.map((m, i) => (
-                  <span key={m.id} style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 14 }}>
-                    {i > 0 && <span style={{ color: inkSoft }}>,</span>}
-                    {medLabel(m)}
-                    <button aria-label={`Delete ${medLabel(m)}`} style={{ ...iconBtn, padding: 2 }} onClick={() => onDelete(m.id)}>
-                      <Trash2 size={12} color={inkSoft} />
-                    </button>
-                  </span>
-                ))}
+                {g.items.map((m, i) =>
+                  editingMedId === m.id ? (
+                    <div key={m.id} style={{ width: "100%", background: paper, border: `1px solid ${border}`, borderRadius: 10, padding: 8, marginTop: 4 }}>
+                      <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
+                        <input value={editName} onChange={(e) => setEditName(e.target.value)} style={{ ...inputStyle, padding: "6px 8px", fontSize: 13, flex: 1.4 }} />
+                        <input value={editDose} onChange={(e) => setEditDose(e.target.value)} style={{ ...inputStyle, padding: "6px 8px", fontSize: 13, flex: 1 }} />
+                      </div>
+                      <input
+                        type="datetime-local"
+                        value={editTime}
+                        onChange={(e) => setEditTime(e.target.value)}
+                        style={{ ...inputStyle, padding: "6px 8px", fontSize: 12, width: "100%", marginBottom: 6 }}
+                      />
+                      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                        <button onClick={saveEdit} style={{ ...primaryBtnSmall, padding: "6px 12px", fontSize: 12 }}>Save</button>
+                        <button onClick={cancelEdit} style={{ background: "none", border: "none", color: inkSoft, fontSize: 12, cursor: "pointer" }}>Cancel</button>
+                        <button
+                          onClick={() => { onDelete(m.id); cancelEdit(); }}
+                          style={{ background: "none", border: "none", color: red, fontSize: 12, cursor: "pointer", marginLeft: "auto" }}
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <span key={m.id} style={{ display: "inline-flex", alignItems: "center", gap: 2, fontSize: 14 }}>
+                      {i > 0 && <span style={{ color: inkSoft, marginRight: 2 }}>,</span>}
+                      <button onClick={() => startEdit(m)} style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontSize: 14, color: ink, textDecoration: "underline", textDecorationColor: border }}>
+                        {medLabel(m)}
+                      </button>
+                    </span>
+                  )
+                )}
               </div>
             </div>
           ))}
