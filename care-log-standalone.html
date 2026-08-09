@@ -308,7 +308,7 @@ function Sparkline({ points, kind, unitSystem, scaleMax, meds, domain }) {
   const medDark = "#33506E"; // darker than the standard blue accent, for better contrast at small sizes
 
   return (
-    <svg width={width} height={chartHeight} role="img"
+    <svg width={width} height={chartHeight} style={{ overflow: "visible" }} role="img"
       aria-label={`Trend chart, scale ${minY} to ${maxY}${unit}, latest value ${last.v.toFixed(1)}${unit}${staggeredMeds.length ? `. Medications in range: ${staggeredMeds.map((m) => m.label).join("; ")}` : ""}`}>
       {kind === "temperature" && (
         <rect x={chartLeft} y={scaleY(feverLine)} width={plotWidth} height={Math.max(scaleY(maxY) - scaleY(feverLine), 0)} fill={redSoft} opacity={0.5} />
