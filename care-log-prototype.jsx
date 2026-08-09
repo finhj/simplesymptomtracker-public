@@ -40,6 +40,7 @@ const TEMPLATES = [
   {
     id: "cold-flu",
     label: "Cold / Flu",
+    category: ["Common Illnesses"],
     searchTerms: ["cough", "runny nose", "sore throat", "flu", "cold", "congestion"],
     description: "Temperature, cough, sore throat, congestion",
     trackers: [
@@ -52,6 +53,7 @@ const TEMPLATES = [
   {
     id: "stomach-bug",
     label: "Stomach bug",
+    category: ["Common Illnesses"],
     searchTerms: ["vomit", "throw up", "nausea", "diarrhea", "stomach"],
     description: "Nausea, vomiting, diarrhea, appetite",
     trackers: [
@@ -64,6 +66,7 @@ const TEMPLATES = [
   {
     id: "migraine",
     label: "Migraine",
+    category: ["Common Illnesses"],
     searchTerms: ["headache", "migraine", "light sensitivity", "aura"],
     description: "Headache severity, light sensitivity, nausea",
     trackers: [
@@ -75,6 +78,7 @@ const TEMPLATES = [
   {
     id: "allergic-reaction",
     label: "Allergic reaction",
+    category: ["Common Illnesses"],
     searchTerms: ["rash", "hives", "itchy", "swelling", "allergy"],
     description: "Rash/hives, swelling, itchiness",
     trackers: [
@@ -86,6 +90,7 @@ const TEMPLATES = [
   {
     id: "ear-infection",
     label: "Ear infection",
+    category: ["Common Illnesses"],
     searchTerms: ["ear pain", "earache", "ear infection"],
     description: "Ear pain, temperature, fussiness",
     trackers: [
@@ -97,6 +102,7 @@ const TEMPLATES = [
   {
     id: "post-procedure",
     label: "Recovering from a procedure",
+    category: ["Common Illnesses"],
     searchTerms: ["surgery", "recovery", "incision", "pain", "procedure"],
     description: "Pain level, incision site, temperature",
     trackers: [
@@ -105,7 +111,91 @@ const TEMPLATES = [
       { name: "Temperature", type: "temperature", unit: "°F" },
     ],
   },
+  {
+    id: "multiple-sclerosis",
+    label: "Multiple Sclerosis",
+    // Genuinely has both physical and cognitive/emotional symptoms — tagged under
+    // both categories rather than forced into one, per the multi-category decision.
+    category: ["Physical Health & Illnesses", "Mental Health & Illnesses"],
+    searchTerms: ["ms", "multiple sclerosis", "fatigue", "relapse", "flare", "numbness", "spasticity"],
+    description: "Fatigue, mobility, cognitive fog, and more — verified against National MS Society, MS Society UK, and NINDS",
+    trackers: [
+      // Core three first, so they're what auto-preselects on the free tier —
+      // the most prevalent symptoms per every source checked.
+      { name: "Fatigue", type: "scale", scaleMax: 5 },
+      { name: "Mobility / balance", type: "scale", scaleMax: 5 },
+      { name: "Cognitive fog", type: "scale", scaleMax: 5 },
+      // Common, well-documented.
+      { name: "Pain", type: "scale", scaleMax: 5 },
+      { name: "Spasticity / muscle stiffness", type: "scale", scaleMax: 5 },
+      { name: "Bladder symptoms", type: "scale", scaleMax: 5 },
+      { name: "Bowel symptoms", type: "scale", scaleMax: 5 },
+      { name: "Vision problems", type: "boolean" }, // often episodic rather than a steady daily severity
+      { name: "Sleep quality", type: "scale", scaleMax: 5 },
+      { name: "Falls", type: "number" }, // count per day — frequency matters more than yes/no
+      // Depression: a plain 0-10 self-report scale for now, not a scored clinical
+      // instrument — PHQ-9 (public domain, cleared) or a licensed Goldberg
+      // adaptation could replace this later via the questionnaire tracker type,
+      // but this needs nothing pending on licensing and works today.
+      { name: "Depression", type: "scale", scaleMax: 10 },
+      // Less common, still worth offering.
+      { name: "Dizziness / vertigo", type: "boolean" },
+      { name: "Tremor", type: "boolean" },
+      { name: "Speech difficulty", type: "boolean" },
+      { name: "Swallowing difficulty", type: "boolean" },
+    ],
+  },
 ];
+
+// Display order for browse-view category headers. A template can belong to more
+// than one category and will render under each — category is a discovery aid, not
+// an exclusive clinical classification.
+const CATEGORY_ORDER = ["Common Illnesses", "Physical Health & Illnesses", "Mental Health & Illnesses"];
+
+// ---------- Questionnaire tracker type ----------
+// Generic infrastructure for score-based, multi-question clinical instruments
+// (PHQ-9, GAD-7, a licensed Goldberg adaptation, etc.). No real instrument content
+// lives here yet — PHQ-9/GAD-7 are licensing-cleared but not yet built in, and the
+// Goldberg adaptation is still blocked on an unresolved licensing question (see
+// licensing-log.md). Nothing with licenseStatus "needs-review" is selectable —
+// that's enforced in code below, not just written down as a policy.
+//
+// The one entry here is a deliberately generic placeholder: entirely original text,
+// not resembling any real instrument, included only so this mechanism is actually
+// testable rather than dormant and invisible. Replace/remove once real content ships.
+const QUESTIONNAIRES = [
+  {
+    id: "example-checkin",
+    name: "Example Check-In (test placeholder — not a real clinical instrument)",
+    description: "Demonstration only. Swap for a real, licensed instrument before this is meant for real use.",
+    licenseStatus: "original-work", // genuinely original placeholder text, not derived from any real instrument
+    attribution: "Placeholder content for testing the questionnaire mechanism only.",
+    questions: [
+      { id: "q1", text: "Example question one", isSafetyCritical: false },
+      { id: "q2", text: "Example question two", isSafetyCritical: false },
+      { id: "q3", text: "Example question three", isSafetyCritical: false },
+    ],
+    scale: { min: 0, max: 3, labels: ["Not at all", "Several days", "More than half the days", "Nearly every day"] },
+    bands: [
+      { min: 0, max: 2, label: "Minimal" },
+      { min: 3, max: 5, label: "Mild" },
+      { min: 6, max: 7, label: "Moderate" },
+      { min: 8, max: 9, label: "Elevated" },
+    ],
+  },
+];
+
+const availableQuestionnaires = QUESTIONNAIRES.filter((q) => q.licenseStatus !== "needs-review");
+
+function questionnaireMaxScore(q) {
+  return q.questions.length * q.scale.max;
+}
+
+function scoreQuestionnaire(questionnaire, responses) {
+  const score = Object.values(responses).reduce((sum, v) => sum + v, 0);
+  const band = (questionnaire.bands.find((b) => score >= b.min && score <= b.max) || {}).label || "";
+  return { score, band };
+}
 
 // ---------- Crypto helpers ----------
 function bufToB64(buf) {
@@ -888,10 +978,15 @@ export default function CareLog() {
   }, [templateQuery, customTrackerDefs]);
 
   function trackerSeries(trackerId) {
+    const tracker = trackers.find((t) => t.id === trackerId);
     return activeEntries
       .filter((e) => e.values[trackerId] != null && typeof e.values[trackerId] !== "boolean")
       .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp))
-      .map((e) => ({ t: new Date(e.timestamp).getTime(), v: e.values[trackerId] }));
+      .map((e) => {
+        const raw = e.values[trackerId];
+        const v = tracker && tracker.type === "questionnaire" ? raw.score : raw;
+        return { t: new Date(e.timestamp).getTime(), v };
+      });
   }
 
   function latestEntryFor(trackerId) {
@@ -1028,6 +1123,12 @@ export default function CareLog() {
     setPendingCustomTracker({ name: def.name, type: def.type, scaleMax: def.scaleMax, sourceCustomDefinitionId: def.id });
   }
 
+  function selectQuestionnaire(q) {
+    setSelectedConcernIds([]);
+    setNewConcernName("");
+    setPendingCustomTracker({ name: q.name, type: "questionnaire", scaleMax: questionnaireMaxScore(q), questionnaireId: q.id });
+  }
+
   function cancelPendingCustomTracker() {
     setPendingCustomTracker(null);
     setSelectedConcernIds([]);
@@ -1038,8 +1139,10 @@ export default function CareLog() {
     if (!pendingCustomTracker || remainingSlots <= 0) return;
     const finalConcernIds = resolveConcernIds();
 
+    // Questionnaires reference a QUESTIONNAIRES entry directly — no separate reusable
+    // CustomTrackerDefinition needed, since QUESTIONNAIRES already is that reusable list.
     let defId = pendingCustomTracker.sourceCustomDefinitionId;
-    if (!defId) {
+    if (!defId && !pendingCustomTracker.questionnaireId) {
       const newDef = { id: uid(), name: pendingCustomTracker.name, type: pendingCustomTracker.type, scaleMax: pendingCustomTracker.scaleMax };
       setCustomTrackerDefs((prev) => [...prev, newDef]);
       defId = newDef.id;
@@ -1051,6 +1154,7 @@ export default function CareLog() {
       type: pendingCustomTracker.type,
       scaleMax: pendingCustomTracker.scaleMax,
       sourceCustomDefinitionId: defId,
+      questionnaireId: pendingCustomTracker.questionnaireId || undefined,
       concernIds: finalConcernIds,
       archived: false,
     };
@@ -1176,7 +1280,12 @@ export default function CareLog() {
       lines.push(`${t.name}:`);
       if (recent.length === 0) lines.push("  no readings");
       else recent.forEach((e) => {
-        const v = t.type === "temperature" ? displayTemp(e.values[t.id], profile.unitSystem).toFixed(1) : e.values[t.id];
+        const raw = e.values[t.id];
+        const v = t.type === "temperature"
+          ? displayTemp(raw, profile.unitSystem).toFixed(1)
+          : t.type === "questionnaire"
+            ? `${raw.score}/${t.scaleMax} (${raw.band})`
+            : raw;
         lines.push(`  ${fmtTime(e.timestamp)} — ${v}${t.type === "temperature" ? tempUnitLabel(profile.unitSystem) : ""}`);
       });
       lines.push("");
@@ -1458,6 +1567,7 @@ export default function CareLog() {
             setNewConcernName={setNewConcernName}
             customDefs={filteredCustomDefs}
             selectExistingCustomDef={selectExistingCustomDef}
+            selectQuestionnaire={selectQuestionnaire}
             showCustomTrackerForm={showCustomTrackerForm}
             startCustomTrackerFlow={startCustomTrackerFlow}
             cancelCustomTrackerForm={cancelCustomTrackerForm}
@@ -1742,6 +1852,7 @@ function TrackerCard({ tracker, series, latest, history, unitSystem, meds, treat
   const [editingEntryId, setEditingEntryId] = useState(null);
   const [editValue, setEditValue] = useState(undefined);
   const [editTime, setEditTime] = useState("");
+  const [showQuestionnaireForm, setShowQuestionnaireForm] = useState(false);
   const logAt = (value) => onLog(value, customTime);
 
   function startEdit(entry) {
@@ -1761,6 +1872,7 @@ function TrackerCard({ tracker, series, latest, history, unitSystem, meds, treat
     cancelEdit();
   }
   function formatValue(v) {
+    if (tracker.type === "questionnaire") return `${v.score}/${tracker.scaleMax} (${v.band})`;
     if (typeof v === "boolean") return v ? "Present" : "Absent";
     if (tracker.type === "temperature") return `${displayTemp(v, unitSystem).toFixed(1)}${unitLabel}`;
     return `${v}`;
@@ -1814,7 +1926,7 @@ function TrackerCard({ tracker, series, latest, history, unitSystem, meds, treat
             </div>
           )}
           {tracker.type === "scale" && (
-            <div style={{ display: "flex", gap: 6 }}>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
               {Array.from({ length: (tracker.scaleMax || 5) + 1 }, (_, n) => n).map((n) => (
                 <button key={n} style={scaleBtn} onClick={() => logAt(n)}>{n}</button>
               ))}
@@ -1826,8 +1938,27 @@ function TrackerCard({ tracker, series, latest, history, unitSystem, meds, treat
               <button style={{ ...scaleBtn, width: "auto", padding: "8px 14px" }} onClick={() => logAt(false)}>Absent</button>
             </div>
           )}
+          {tracker.type === "questionnaire" && (() => {
+            const questionnaire = QUESTIONNAIRES.find((q) => q.id === tracker.questionnaireId);
+            if (!questionnaire) return <div style={{ fontSize: 12, color: red }}>Questionnaire not found.</div>;
+            return showQuestionnaireForm ? (
+              <QuestionnaireForm
+                questionnaire={questionnaire}
+                onCancel={() => setShowQuestionnaireForm(false)}
+                onSubmit={(responses) => {
+                  const { score, band } = scoreQuestionnaire(questionnaire, responses);
+                  onLog({ score, band, responses }, null);
+                  setShowQuestionnaireForm(false);
+                }}
+              />
+            ) : (
+              <button style={primaryBtnSmall} onClick={() => setShowQuestionnaireForm(true)}>
+                Take questionnaire
+              </button>
+            );
+          })()}
 
-          {customTime === null ? (
+          {tracker.type !== "questionnaire" && (customTime === null ? (
             <button
               onClick={() => setCustomTime(nowForInput())}
               style={{ background: "none", border: "none", color: blue, fontSize: 12, fontWeight: 600, padding: "6px 0 0", cursor: "pointer" }}
@@ -1846,15 +1977,17 @@ function TrackerCard({ tracker, series, latest, history, unitSystem, meds, treat
                 Use now
               </button>
             </div>
-          )}
+          ))}
 
           {latest && (
             <div style={{ fontSize: 12, color: inkSoft, marginTop: 6 }}>
-              Last: {typeof latest.values[tracker.id] === "boolean"
-                ? (latest.values[tracker.id] ? "Present" : "Absent")
-                : tracker.type === "temperature"
-                  ? displayTemp(latest.values[tracker.id], unitSystem).toFixed(1)
-                  : latest.values[tracker.id]}
+              Last: {tracker.type === "questionnaire"
+                ? `${latest.values[tracker.id].score}/${tracker.scaleMax} (${latest.values[tracker.id].band})`
+                : typeof latest.values[tracker.id] === "boolean"
+                  ? (latest.values[tracker.id] ? "Present" : "Absent")
+                  : tracker.type === "temperature"
+                    ? displayTemp(latest.values[tracker.id], unitSystem).toFixed(1)
+                    : latest.values[tracker.id]}
               {unitLabel || ""} · {fmtTimeShort(latest.timestamp)}
             </div>
           )}
@@ -1874,7 +2007,21 @@ function TrackerCard({ tracker, series, latest, history, unitSystem, meds, treat
             <div style={{ marginTop: 8 }}>
               {historyShown.map((entry) => (
                 <div key={entry.id} style={{ padding: "6px 0", borderBottom: `1px solid ${paperDark}` }}>
-                  {editingEntryId === entry.id ? (
+                  {tracker.type === "questionnaire" ? (
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%", fontSize: 13 }}>
+                      <span>{formatValue(entry.value)}</span>
+                      <span style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                        <span style={{ color: inkSoft }}>{fmtTime(entry.timestamp)}</span>
+                        <button
+                          aria-label="Delete this questionnaire result"
+                          onClick={() => onDeleteEntry(entry.id)}
+                          style={{ background: "none", border: "none", color: red, fontSize: 12, cursor: "pointer" }}
+                        >
+                          Delete
+                        </button>
+                      </span>
+                    </div>
+                  ) : editingEntryId === entry.id ? (
                     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                       {tracker.type === "temperature" && (
                         <input
@@ -1893,7 +2040,7 @@ function TrackerCard({ tracker, series, latest, history, unitSystem, meds, treat
                         />
                       )}
                       {tracker.type === "scale" && (
-                        <div style={{ display: "flex", gap: 4 }}>
+                        <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
                           {Array.from({ length: (tracker.scaleMax || 5) + 1 }, (_, n) => n).map((n) => (
                             <button
                               key={n}
@@ -1970,6 +2117,49 @@ function TrackerCard({ tracker, series, latest, history, unitSystem, meds, treat
   );
 }
 
+function QuestionnaireForm({ questionnaire, onSubmit, onCancel }) {
+  const [responses, setResponses] = useState({});
+  const allAnswered = questionnaire.questions.every((q) => responses[q.id] !== undefined);
+
+  return (
+    <div style={{ background: paper, border: `1px solid ${border}`, borderRadius: 12, padding: 12, marginTop: 8 }}>
+      {questionnaire.questions.map((q, i) => (
+        <div key={q.id} style={{ marginBottom: 14 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>
+            {i + 1}. {q.text}
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            {questionnaire.scale.labels.map((label, val) => (
+              <button
+                key={val}
+                onClick={() => setResponses((prev) => ({ ...prev, [q.id]: val }))}
+                style={{
+                  ...toggleBtn, textAlign: "left", padding: "8px 10px", fontSize: 12,
+                  ...(responses[q.id] === val ? toggleBtnActive : {}),
+                }}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+      ))}
+      <div style={{ display: "flex", gap: 8 }}>
+        <button
+          style={{ ...primaryBtnSmall, opacity: allAnswered ? 1 : 0.5 }}
+          disabled={!allAnswered}
+          onClick={() => onSubmit(responses)}
+        >
+          Submit
+        </button>
+        <button onClick={onCancel} style={{ background: "none", border: "none", color: inkSoft, fontSize: 13, cursor: "pointer" }}>
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function ConcernPicker({ concerns, selectedConcernIds, toggleConcernSelection, newConcernName, setNewConcernName }) {
   return (
     <div style={{ marginTop: 14, paddingTop: 12, borderTop: `1px solid ${paperDark}` }}>
@@ -2005,7 +2195,7 @@ function ConcernPicker({ concerns, selectedConcernIds, toggleConcernSelection, n
 function TemplatePicker({
   query, setQuery, templates, remainingSlots, openTemplateId, openTemplate, selectedTrackerNames, toggleTrackerSelection, addSelectedTrackers, onClose,
   concerns, selectedConcernIds, toggleConcernSelection, newConcernName, setNewConcernName,
-  customDefs, selectExistingCustomDef,
+  customDefs, selectExistingCustomDef, selectQuestionnaire,
   showCustomTrackerForm, startCustomTrackerFlow, cancelCustomTrackerForm,
   customTrackerNameInput, setCustomTrackerNameInput, customTrackerType, setCustomTrackerType, confirmCustomTrackerDetails,
   pendingCustomTracker, cancelPendingCustomTracker, addPendingCustomTracker,
@@ -2180,18 +2370,40 @@ function TemplatePicker({
               </div>
             </button>
           ))}
-          <div style={{ fontSize: 12, fontWeight: 700, color: inkSoft, textTransform: "uppercase", letterSpacing: 0.4, margin: "14px 0 8px" }}>
-            Illness templates
-          </div>
         </>
       )}
 
-      {templates.map((t) => (
-        <button key={t.id} style={templateRow} onClick={() => openTemplate(t.id)}>
-          <div style={{ fontSize: 15, fontWeight: 700 }}>{t.label}</div>
-          <div style={{ fontSize: 12, color: inkSoft, marginTop: 2 }}>{t.description}</div>
-        </button>
-      ))}
+      {availableQuestionnaires.length > 0 && (
+        <>
+          <div style={{ fontSize: 12, fontWeight: 700, color: inkSoft, textTransform: "uppercase", letterSpacing: 0.4, margin: "14px 0 8px" }}>
+            Questionnaires
+          </div>
+          {availableQuestionnaires.map((q) => (
+            <button key={q.id} style={templateRow} onClick={() => selectQuestionnaire(q)}>
+              <div style={{ fontSize: 15, fontWeight: 700 }}>{q.name}</div>
+              <div style={{ fontSize: 12, color: inkSoft, marginTop: 2 }}>{q.description}</div>
+            </button>
+          ))}
+        </>
+      )}
+
+      {CATEGORY_ORDER.map((cat) => {
+        const inCategory = templates.filter((t) => (t.category || []).includes(cat));
+        if (inCategory.length === 0) return null;
+        return (
+          <div key={cat}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: inkSoft, textTransform: "uppercase", letterSpacing: 0.4, margin: "14px 0 8px" }}>
+              {cat}
+            </div>
+            {inCategory.map((t) => (
+              <button key={`${cat}-${t.id}`} style={templateRow} onClick={() => openTemplate(t.id)}>
+                <div style={{ fontSize: 15, fontWeight: 700 }}>{t.label}</div>
+                <div style={{ fontSize: 12, color: inkSoft, marginTop: 2 }}>{t.description}</div>
+              </button>
+            ))}
+          </div>
+        );
+      })}
 
       {noMatches && query.trim() ? (
         <button style={templateRow} onClick={() => startCustomTrackerFlow(query.trim())}>
