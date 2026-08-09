@@ -497,6 +497,7 @@ export default function CareLog() {
 
   const [showSettings, setShowSettings] = useState(false);
   const [showEmergencyResources, setShowEmergencyResources] = useState(false);
+  const [showRecentlyDeleted, setShowRecentlyDeleted] = useState(false);
   const [showBackup, setShowBackup] = useState(false);
   const [restorePasscode, setRestorePasscode] = useState("");
   const [restoreFile, setRestoreFile] = useState(null);
@@ -659,20 +660,23 @@ export default function CareLog() {
   }
 
   // ---------- Backup export / restore ----------
-  async function handleExportBackup() {
+  async function downloadEncryptedBackup(payload, filenameTag) {
     if (!cryptoKeyRef.current) return;
-    const payload = { trackers, entries, meds, profile, concerns, customTrackerDefs };
     const { iv, ciphertext } = await encryptJSON(cryptoKeyRef.current, payload);
     const backup = { formatVersion: 1, saltB64: saltRef.current, iterations: PBKDF2_ITERATIONS, iv, ciphertext, exportedAt: new Date().toISOString() };
     const blob = new Blob([JSON.stringify(backup)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `care-log-backup-${new Date().toISOString().slice(0, 10)}.json`;
+    a.download = `care-log-backup-${filenameTag}-${new Date().toISOString().slice(0, 10)}.json`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
+  }
+
+  async function handleExportBackup() {
+    await downloadEncryptedBackup({ trackers, entries, meds, profile, concerns, customTrackerDefs }, "manual");
   }
 
   async function handleRestoreFromFile(file, passcode, isFirstRun) {
@@ -684,7 +688,22 @@ export default function CareLog() {
       const key = await deriveKey(passcode, backup.saltB64, backup.iterations);
       // A successful decrypt IS the integrity check — AES-GCM's auth tag makes a
       // tampered or corrupted file fail here rather than silently restoring bad data.
+      // Decrypt and validate the incoming file FIRST, before touching anything —
+      // if it's wrong, nothing about the current session has changed yet.
       const data = await decryptJSON(key, backup.iv, backup.ciphertext);
+
+      // Restoring is genuinely destructive — it replaces everything. Before doing
+      // that, automatically save a snapshot of what's about to be overwritten, using
+      // the CURRENT key/salt (not yet switched to the incoming backup's), so there's
+      // always a real, durable way to undo this by re-importing that snapshot later —
+      // not just a same-session convenience that's gone the moment the tab closes.
+      if (!isFirstRun) {
+        await downloadEncryptedBackup(
+          { trackers, entries, meds, profile, concerns, customTrackerDefs },
+          "before-restore"
+        );
+      }
+
       cryptoKeyRef.current = key;
       saltRef.current = backup.saltB64;
       setTrackers(data.trackers || []);
@@ -710,20 +729,34 @@ export default function CareLog() {
   const activeTrackers = useMemo(() => trackers.filter((t) => !t.archived), [trackers]);
   const remainingSlots = MAX_TRACKERS - activeTrackers.length;
 
+  // Soft-deleted entries/meds stay in storage (so they're restorable) but are excluded
+  // from every normal read — display, charts, reports, counts. Only the "Recently
+  // deleted" recovery panel reads the raw arrays including deleted items.
+  const activeEntries = useMemo(() => entries.filter((e) => !e.deletedAt), [entries]);
+  const activeMeds = useMemo(() => meds.filter((m) => !m.deletedAt), [meds]);
+  const deletedEntries = useMemo(
+    () => entries.filter((e) => e.deletedAt).sort((a, b) => new Date(b.deletedAt) - new Date(a.deletedAt)),
+    [entries]
+  );
+  const deletedMeds = useMemo(
+    () => meds.filter((m) => m.deletedAt).sort((a, b) => new Date(b.deletedAt) - new Date(a.deletedAt)),
+    [meds]
+  );
+
   // Absolute bounds — the full span of everything logged. Zoom/pan and range
   // presets are always clamped within this, so you can't pan into empty space.
   const fullDomain = useMemo(() => {
     const times = [];
     activeTrackers.forEach((t) => {
-      entries.forEach((e) => {
+      activeEntries.forEach((e) => {
         const v = e.values[t.id];
         if (v != null && typeof v !== "boolean") times.push(new Date(e.timestamp).getTime());
       });
     });
-    meds.forEach((m) => times.push(new Date(m.timestamp).getTime()));
+    activeMeds.forEach((m) => times.push(new Date(m.timestamp).getTime()));
     if (times.length === 0) return null;
     return { minX: Math.min(...times), maxX: Math.max(...times) };
-  }, [activeTrackers, entries, meds]);
+  }, [activeTrackers, activeEntries, activeMeds]);
 
   const [rangePreset, setRangePreset] = useState("all"); // "24h" | "3d" | "7d" | "all"
   const [customViewDomain, setCustomViewDomain] = useState(null); // set by pinch/drag on any chart
@@ -771,7 +804,7 @@ export default function CareLog() {
     setCustomViewDomain({ minX: Math.max(minX, lower), maxX: Math.min(maxX, upper) });
   }
 
-  const knownMedNames = useMemo(() => [...new Set(meds.map((m) => m.name.trim().toLowerCase()))], [meds]);
+  const knownMedNames = useMemo(() => [...new Set(activeMeds.map((m) => m.name.trim().toLowerCase()))], [activeMeds]);
   const medCatalogCount = knownMedNames.length;
 
   const filteredTemplates = useMemo(() => {
@@ -789,14 +822,14 @@ export default function CareLog() {
   }, [templateQuery, customTrackerDefs]);
 
   function trackerSeries(trackerId) {
-    return entries
+    return activeEntries
       .filter((e) => e.values[trackerId] != null && typeof e.values[trackerId] !== "boolean")
       .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp))
       .map((e) => ({ t: new Date(e.timestamp).getTime(), v: e.values[trackerId] }));
   }
 
   function latestEntryFor(trackerId) {
-    return [...entries]
+    return [...activeEntries]
       .filter((e) => e.values[trackerId] != null)
       .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))[0];
   }
@@ -804,7 +837,7 @@ export default function CareLog() {
   // Full history for a tracker (any value type, including booleans) — used by the
   // per-tracker History list, most recent first.
   function entriesForTracker(trackerId) {
-    return entries
+    return activeEntries
       .filter((e) => e.values[trackerId] != null)
       .map((e) => ({ id: e.id, timestamp: e.timestamp, value: e.values[trackerId] }))
       .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
@@ -821,16 +854,14 @@ export default function CareLog() {
   }
 
   function deleteEntryValue(entryId, trackerId) {
-    setEntries((prev) =>
-      prev
-        .map((e) => {
-          if (e.id !== entryId) return e;
-          const rest = { ...e.values };
-          delete rest[trackerId];
-          return { ...e, values: rest };
-        })
-        .filter((e) => Object.keys(e.values).length > 0)
-    );
+    // Soft delete — every entry created by this app only ever holds one tracker's
+    // value, so removing that value is equivalent to removing the whole entry.
+    // Marked deleted, not erased, so it can be undone from Recently Deleted.
+    setEntries((prev) => prev.map((e) => (e.id === entryId ? { ...e, deletedAt: new Date().toISOString() } : e)));
+  }
+
+  function restoreEntry(entryId) {
+    setEntries((prev) => prev.map((e) => (e.id === entryId ? { ...e, deletedAt: undefined } : e)));
   }
 
   // ---------- Actions ----------
@@ -988,7 +1019,11 @@ export default function CareLog() {
   }
 
   function deleteMed(id) {
-    setMeds((prev) => prev.filter((m) => m.id !== id));
+    setMeds((prev) => prev.map((m) => (m.id === id ? { ...m, deletedAt: new Date().toISOString() } : m)));
+  }
+
+  function restoreMed(id) {
+    setMeds((prev) => prev.map((m) => (m.id === id ? { ...m, deletedAt: undefined } : m)));
   }
 
   function updateMed(id, newName, newDose, newTimeInput) {
@@ -1005,7 +1040,7 @@ export default function CareLog() {
     const since = new Date(Date.now() - 72 * 3600 * 1000);
     const lines = [`Care Log summary — last 72 hours`, `Generated ${new Date().toLocaleString()}`, ""];
     activeTrackers.forEach((t) => {
-      const recent = entries
+      const recent = activeEntries
         .filter((e) => e.values[t.id] != null && new Date(e.timestamp) >= since)
         .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
       lines.push(`${t.name}:`);
@@ -1016,7 +1051,7 @@ export default function CareLog() {
       });
       lines.push("");
     });
-    const recentMeds = meds
+    const recentMeds = activeMeds
       .filter((m) => new Date(m.timestamp) >= since)
       .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
     lines.push("Medications:");
@@ -1025,7 +1060,7 @@ export default function CareLog() {
       lines.push(`  ${g.label} — ${g.items.map(medLabel).join(", ")}`)
     );
     return lines.join("\n");
-  }, [activeTrackers, entries, meds]);
+  }, [activeTrackers, activeEntries, activeMeds, profile.unitSystem]);
 
   async function copyReport() {
     try {
@@ -1137,7 +1172,7 @@ export default function CareLog() {
       <div style={{ maxWidth: 560, margin: "0 auto", padding: "20px 16px 80px" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 18, flexWrap: "wrap", gap: 8 }}>
           <h1 style={{ fontSize: 26, fontWeight: 700, margin: 0, fontFamily: "Georgia, serif" }}>Care Log</h1>
-          <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+          <div style={{ display: "flex", gap: 4, alignItems: "center", flexWrap: "wrap" }}>
             <button
               onClick={() => setShowEmergencyResources((s) => !s)}
               style={{ ...linkBtnSmall, color: red, borderColor: red, fontWeight: 700 }}
@@ -1146,9 +1181,50 @@ export default function CareLog() {
             </button>
             <button style={linkBtnSmall} onClick={() => setShowSettings((s) => !s)}>Units</button>
             <button style={linkBtnSmall} onClick={() => setShowBackup((s) => !s)}>Backup</button>
+            {(deletedEntries.length + deletedMeds.length > 0) && (
+              <button style={linkBtnSmall} onClick={() => setShowRecentlyDeleted((s) => !s)}>
+                Recently Deleted ({deletedEntries.length + deletedMeds.length})
+              </button>
+            )}
           </div>
         </div>
 
+        {showRecentlyDeleted && (
+          <div style={{ background: card, border: `1px solid ${border}`, borderRadius: 14, padding: 14, marginBottom: 16 }}>
+            <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 4 }}>Recently deleted</div>
+            <p style={{ fontSize: 12, color: inkSoft, margin: "0 0 10px" }}>
+              Deleting never happens permanently by accident — anything you've deleted stays here until you restore it.
+            </p>
+            {deletedEntries.length === 0 && deletedMeds.length === 0 && (
+              <div style={{ fontSize: 13, color: inkSoft }}>Nothing here right now.</div>
+            )}
+            {deletedEntries.map((e) => {
+              const trackerName = trackers.find((t) => t.id === Object.keys(e.values)[0])?.name || "Deleted tracker";
+              const trackerId = Object.keys(e.values)[0];
+              const value = e.values[trackerId];
+              return (
+                <div key={e.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: `1px solid ${paperDark}` }}>
+                  <div>
+                    <div style={{ fontSize: 14, fontWeight: 600 }}>{trackerName}</div>
+                    <div style={{ fontSize: 12, color: inkSoft }}>
+                      {typeof value === "boolean" ? (value ? "Present" : "Absent") : value} · {fmtTime(e.timestamp)}
+                    </div>
+                  </div>
+                  <button style={primaryBtnSmall} onClick={() => restoreEntry(e.id)}>Restore</button>
+                </div>
+              );
+            })}
+            {deletedMeds.map((m) => (
+              <div key={m.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: `1px solid ${paperDark}` }}>
+                <div>
+                  <div style={{ fontSize: 14, fontWeight: 600 }}>{medLabel(m)}</div>
+                  <div style={{ fontSize: 12, color: inkSoft }}>{fmtTime(m.timestamp)}</div>
+                </div>
+                <button style={primaryBtnSmall} onClick={() => restoreMed(m.id)}>Restore</button>
+              </div>
+            ))}
+          </div>
+        )}
         {showEmergencyResources && (
           <div style={{ background: redSoft, border: `1px solid ${red}`, borderRadius: 14, padding: 14, marginBottom: 18 }}>
             <div style={{ fontSize: 14, fontWeight: 700, color: red, marginBottom: 6 }}>Emergency Resources</div>
@@ -1190,11 +1266,11 @@ export default function CareLog() {
 
             <div style={{ marginTop: 14, paddingTop: 14, borderTop: `1px solid ${paperDark}` }}>
               <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 8 }}>Restore from a backup</div>
-              <p style={{ fontSize: 12, color: red, margin: "0 0 8px" }}>This replaces everything currently in the app with the backup's contents.</p>
+              <p style={{ fontSize: 12, color: red, margin: "0 0 8px" }}>This replaces everything currently in the app — before it does, a snapshot of what's here now downloads automatically, so this can always be undone by restoring that file.</p>
               <input type="file" accept="application/json" onChange={(e) => setRestoreFile(e.target.files[0] || null)} style={{ ...inputStyle, marginBottom: 8 }} />
               <input type="password" placeholder="Backup passcode" value={restorePasscode} onChange={(e) => setRestorePasscode(e.target.value)} style={{ ...inputStyle, marginBottom: 8 }} />
               {restoreError && <div style={errorStyle}>{restoreError}</div>}
-              {restoreSuccess && <div style={{ ...errorStyle, background: tealSoft, color: teal, borderColor: teal }}>Restored.</div>}
+              {restoreSuccess && <div style={{ ...errorStyle, background: tealSoft, color: teal, borderColor: teal }}>Restored — a snapshot of your previous data was also saved to your downloads, in case you want to undo this.</div>}
               <button
                 style={{ ...primaryBtnSmall, opacity: !restoreFile || !restorePasscode ? 0.5 : 1 }}
                 disabled={!restoreFile || !restorePasscode}
@@ -1282,7 +1358,7 @@ export default function CareLog() {
                   latest={latestEntryFor(t.id)}
                   history={entriesForTracker(t.id)}
                   unitSystem={profile.unitSystem}
-                  meds={meds}
+                  meds={activeMeds}
                   domain={chartDomain}
                   onViewChange={handleViewChange}
                   draftValue={draftValues[t.id]}
@@ -1352,7 +1428,7 @@ export default function CareLog() {
             </button>
 
             <MedicationSection
-              meds={meds}
+              meds={activeMeds}
               medName={medName}
               setMedName={setMedName}
               medDose={medDose}
