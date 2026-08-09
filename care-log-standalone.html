@@ -219,6 +219,12 @@ function fmtTime(iso) {
 function fmtTimeShort(iso) {
   return new Date(iso).toLocaleString(undefined, { hour: "numeric", minute: "2-digit" });
 }
+function nowForInput() {
+  const d = new Date();
+  const off = d.getTimezoneOffset();
+  const local = new Date(d.getTime() - off * 60000);
+  return local.toISOString().slice(0, 16);
+}
 // Groups meds that display at the same minute (e.g. two given together) into one
 // row instead of repeating the timestamp — "3:15 PM — Ibuprofen 200mg, Tylenol 500mg"
 // rather than two separate lines. Grouping by the *displayed* time (not raw timestamp)
@@ -605,19 +611,20 @@ function CareLog() {
     setTrackers((prev) => prev.map((t) => (t.id === id ? { ...t, archived: true } : t)));
   }
 
-  function logValue(trackerId, value, isTemperature) {
-    const now = new Date().toISOString();
+  function logValue(trackerId, value, isTemperature, atTime) {
+    const timestamp = atTime ? new Date(atTime).toISOString() : new Date().toISOString();
     const stored = isTemperature ? toCelsius(value, profile.unitSystem) : value;
-    setEntries((prev) => [...prev, { id: uid(), timestamp: now, values: { [trackerId]: stored } }]);
+    setEntries((prev) => [...prev, { id: uid(), timestamp, values: { [trackerId]: stored } }]);
     setDraftValues((d) => ({ ...d, [trackerId]: undefined }));
   }
 
-  function addMedication() {
+  function addMedication(atTime) {
     const name = medName.trim();
     if (!name) return;
     const isNewDistinct = !knownMedNames.includes(name.toLowerCase());
     if (isNewDistinct && medCatalogCount >= MAX_MEDICATIONS) return;
-    setMeds((prev) => [...prev, { id: uid(), name, dose: medDose.trim(), timestamp: new Date().toISOString() }]);
+    const timestamp = atTime ? new Date(atTime).toISOString() : new Date().toISOString();
+    setMeds((prev) => [...prev, { id: uid(), name, dose: medDose.trim(), timestamp }]);
     setMedName("");
     setMedDose("");
   }
@@ -847,7 +854,7 @@ function CareLog() {
                 domain={chartDomain}
                 draftValue={draftValues[t.id]}
                 onDraftChange={(v) => setDraftValues((d) => ({ ...d, [t.id]: v }))}
-                onLog={(v) => logValue(t.id, v, t.type === "temperature")}
+                onLog={(v, atTime) => logValue(t.id, v, t.type === "temperature", atTime)}
                 onArchive={() => archiveTracker(t.id)}
               />
             ))}
@@ -915,6 +922,8 @@ function Field({ label, children }) {
 
 function TrackerCard({ tracker, series, latest, unitSystem, meds, domain, draftValue, onDraftChange, onLog, onArchive }) {
   const unitLabel = tracker.type === "temperature" ? tempUnitLabel(unitSystem) : null;
+  const [customTime, setCustomTime] = useState(null); // null = log at "now" (the fast default)
+  const logAt = (value) => onLog(value, customTime);
   return (
     <div style={{ background: card, border: `1px solid ${border}`, borderRadius: 16, padding: 14, marginBottom: 12 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
@@ -939,7 +948,7 @@ function TrackerCard({ tracker, series, latest, unitSystem, meds, domain, draftV
                 style={{ ...inputStyle, width: 90 }}
               />
               <span style={{ fontSize: 13, color: inkSoft }}>{unitLabel}</span>
-              <button style={primaryBtnSmall} onClick={() => draftValue !== undefined && draftValue !== "" && onLog(draftValue)}>
+              <button style={primaryBtnSmall} onClick={() => draftValue !== undefined && draftValue !== "" && logAt(draftValue)}>
                 Log
               </button>
             </div>
@@ -947,16 +956,38 @@ function TrackerCard({ tracker, series, latest, unitSystem, meds, domain, draftV
           {tracker.type === "scale" && (
             <div style={{ display: "flex", gap: 6 }}>
               {Array.from({ length: (tracker.scaleMax || 5) + 1 }, (_, n) => n).map((n) => (
-                <button key={n} style={scaleBtn} onClick={() => onLog(n)}>{n}</button>
+                <button key={n} style={scaleBtn} onClick={() => logAt(n)}>{n}</button>
               ))}
             </div>
           )}
           {tracker.type === "boolean" && (
             <div style={{ display: "flex", gap: 8 }}>
-              <button style={{ ...scaleBtn, width: "auto", padding: "8px 14px" }} onClick={() => onLog(true)}>Present</button>
-              <button style={{ ...scaleBtn, width: "auto", padding: "8px 14px" }} onClick={() => onLog(false)}>Absent</button>
+              <button style={{ ...scaleBtn, width: "auto", padding: "8px 14px" }} onClick={() => logAt(true)}>Present</button>
+              <button style={{ ...scaleBtn, width: "auto", padding: "8px 14px" }} onClick={() => logAt(false)}>Absent</button>
             </div>
           )}
+
+          {customTime === null ? (
+            <button
+              onClick={() => setCustomTime(nowForInput())}
+              style={{ background: "none", border: "none", color: blue, fontSize: 12, fontWeight: 600, padding: "6px 0 0", cursor: "pointer" }}
+            >
+              Log for a different time
+            </button>
+          ) : (
+            <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6 }}>
+              <input
+                type="datetime-local"
+                value={customTime}
+                onChange={(e) => setCustomTime(e.target.value)}
+                style={{ ...inputStyle, padding: "6px 8px", fontSize: 12, flex: 1 }}
+              />
+              <button onClick={() => setCustomTime(null)} style={{ background: "none", border: "none", color: inkSoft, fontSize: 12, cursor: "pointer" }}>
+                Use now
+              </button>
+            </div>
+          )}
+
           {latest && (
             <div style={{ fontSize: 12, color: inkSoft, marginTop: 6 }}>
               Last: {typeof latest.values[tracker.id] === "boolean"
@@ -1051,6 +1082,7 @@ function MedicationSection({ meds, medName, setMedName, medDose, setMedDose, onA
   const grouped = groupMedsByDisplayTime(sorted);
   const isNewDistinct = medName.trim() && !knownMedNames.includes(medName.trim().toLowerCase());
   const atCap = isNewDistinct && catalogCount >= MAX_MEDICATIONS;
+  const [customTime, setCustomTime] = useState(null); // null = log at "now" (the fast default)
   return (
     <div style={{ background: card, border: `1px solid ${border}`, borderRadius: 16, padding: 14, marginTop: 20, marginBottom: 16 }}>
       <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 10 }}>Medications</div>
@@ -1061,7 +1093,31 @@ function MedicationSection({ meds, medName, setMedName, medDose, setMedDose, onA
       {atCap && (
         <div style={{ ...errorStyle, marginBottom: 8 }}>Free plan: 15 medications tracked. Delete an unused one to add a new name.</div>
       )}
-      <button style={{ ...primaryBtnSmall, opacity: !medName.trim() || atCap ? 0.5 : 1 }} disabled={!medName.trim() || atCap} onClick={onAdd}>
+      {customTime === null ? (
+        <button
+          onClick={() => setCustomTime(nowForInput())}
+          style={{ background: "none", border: "none", color: blue, fontSize: 12, fontWeight: 600, padding: "0 0 8px", cursor: "pointer", display: "block" }}
+        >
+          Log for a different time
+        </button>
+      ) : (
+        <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8 }}>
+          <input
+            type="datetime-local"
+            value={customTime}
+            onChange={(e) => setCustomTime(e.target.value)}
+            style={{ ...inputStyle, padding: "6px 8px", fontSize: 12, flex: 1 }}
+          />
+          <button onClick={() => setCustomTime(null)} style={{ background: "none", border: "none", color: inkSoft, fontSize: 12, cursor: "pointer" }}>
+            Use now
+          </button>
+        </div>
+      )}
+      <button
+        style={{ ...primaryBtnSmall, opacity: !medName.trim() || atCap ? 0.5 : 1 }}
+        disabled={!medName.trim() || atCap}
+        onClick={() => { onAdd(customTime); setCustomTime(null); }}
+      >
         Add medication
       </button>
       {grouped.length > 0 && (

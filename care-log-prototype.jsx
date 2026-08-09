@@ -151,12 +151,38 @@ function fmtTime(iso) {
 function fmtTimeShort(iso) {
   return new Date(iso).toLocaleString(undefined, { hour: "numeric", minute: "2-digit" });
 }
+function nowForInput() {
+  const d = new Date();
+  const off = d.getTimezoneOffset();
+  const local = new Date(d.getTime() - off * 60000);
+  return local.toISOString().slice(0, 16);
+}
+// Groups meds that display at the same minute (e.g. two given together) into one
+// row instead of repeating the timestamp — "3:15 PM — Ibuprofen 200mg, Tylenol 500mg"
+// rather than two separate lines. Grouping by the *displayed* time (not raw timestamp)
+// means it works even if the two were logged a few seconds apart in separate taps.
+function groupMedsByDisplayTime(sortedMeds) {
+  const groups = [];
+  for (const m of sortedMeds) {
+    const label = fmtTime(m.timestamp);
+    const last = groups[groups.length - 1];
+    if (last && last.label === label) {
+      last.items.push(m);
+    } else {
+      groups.push({ label, items: [m] });
+    }
+  }
+  return groups;
+}
+function medLabel(m) {
+  return m.name + (m.dose ? ` ${m.dose}` : "");
+}
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
 // ---------- Lightweight sparkline (no chart library — fast load) ----------
-function Sparkline({ points, kind, unitSystem, scaleMax }) {
+function Sparkline({ points, kind, unitSystem, scaleMax, meds, domain }) {
   const width = 260, height = 56, pad = 6;
   const chartLeft = 34; // reserve space for axis labels
   const plotWidth = width - chartLeft;
@@ -169,14 +195,30 @@ function Sparkline({ points, kind, unitSystem, scaleMax }) {
   const feverLine = kind === "temperature" ? displayTemp(FEVER_C, unitSystem) : null;
   const unit = kind === "temperature" ? tempUnitLabel(unitSystem) : "";
   const xs = display.map((p) => p.t);
-  const minX = Math.min(...xs), maxX = Math.max(...xs);
-  const scaleX = (t) => (xs.length > 1 ? ((t - minX) / (maxX - minX || 1)) * (plotWidth - pad * 2) + pad + chartLeft : plotWidth / 2 + chartLeft);
+  // Prefer the shared domain (same timeline across every tracker + med chart) — fall
+  // back to this chart's own data only if no shared domain was supplied.
+  const minX = domain ? domain.minX : Math.min(...xs);
+  const maxX = domain ? domain.maxX : Math.max(...xs);
+  const scaleX = (t) => ((t - minX) / (maxX - minX || 1)) * (plotWidth - pad * 2) + pad + chartLeft;
   const scaleY = (v) => height - pad - ((v - minY) / (maxY - minY)) * (height - pad * 2);
   const d = display.map((p, i) => `${i === 0 ? "M" : "L"} ${scaleX(p.t).toFixed(1)} ${scaleY(p.v).toFixed(1)}`).join(" ");
   const last = display[display.length - 1];
   const axisLabelStyle = { fontSize: 9, fill: inkSoft, fontFamily: "-apple-system, sans-serif" };
+
+  // Medications logged within this chart's visible time range, shown as a bullet
+  // with a diagonal label rising from it — same concept as the earlier fever-tracker
+  // prototype, rebuilt for this lightweight hand-drawn chart (no chart library).
+  const medSpan = Math.max(maxX - minX, 1);
+  const medPad = medSpan * 0.05;
+  const chartMeds = (meds || [])
+    .map((m) => ({ ...m, t: new Date(m.timestamp).getTime() }))
+    .filter((m) => m.t >= minX - medPad && m.t <= maxX + medPad)
+    .sort((a, b) => a.t - b.t);
+  const baseY = height - pad;
+
   return (
-    <svg width={width} height={height} role="img" aria-label={`Trend chart, scale ${minY} to ${maxY}${unit}, latest value ${last.v.toFixed(1)}${unit}`}>
+    <svg width={width} height={height + (chartMeds.length ? 30 : 0)} role="img"
+      aria-label={`Trend chart, scale ${minY} to ${maxY}${unit}, latest value ${last.v.toFixed(1)}${unit}${chartMeds.length ? `. Medications in range: ${chartMeds.map(medLabel).join(", ")}` : ""}`}>
       {kind === "temperature" && (
         <rect x={chartLeft} y={scaleY(feverLine)} width={plotWidth} height={Math.max(scaleY(maxY) - scaleY(feverLine), 0)} fill={redSoft} opacity={0.5} />
       )}
@@ -190,6 +232,22 @@ function Sparkline({ points, kind, unitSystem, scaleMax }) {
       {display.map((p, i) => (
         <circle key={i} cx={scaleX(p.t)} cy={scaleY(p.v)} r={2.5} fill={kind === "temperature" && p.v >= feverLine ? red : teal} />
       ))}
+      {chartMeds.map((m) => {
+        const x = scaleX(m.t);
+        return (
+          <g key={m.id}>
+            <line x1={x} y1={baseY} x2={x} y2={pad} stroke={blue} strokeOpacity={0.35} strokeDasharray="2 2" />
+            <circle cx={x} cy={baseY} r={3} fill={blue} stroke={card} strokeWidth={1} />
+            <text
+              x={x} y={baseY} transform={`rotate(-55 ${x} ${baseY})`} dx={5} dy={-4}
+              fontSize={9} fontWeight={600} fill={blue}
+              fontFamily="-apple-system, sans-serif"
+            >
+              {medLabel(m)}
+            </text>
+          </g>
+        );
+      })}
     </svg>
   );
 }
@@ -407,6 +465,22 @@ export default function CareLog() {
   const activeTrackers = useMemo(() => trackers.filter((t) => !t.archived), [trackers]);
   const remainingSlots = MAX_TRACKERS - activeTrackers.length;
 
+  // One shared time domain for every chart, so trackers and medications are always
+  // plotted on the same timeline and can be visually compared side by side, rather
+  // than each card silently picking its own window based on just its own data.
+  const chartDomain = useMemo(() => {
+    const times = [];
+    activeTrackers.forEach((t) => {
+      entries.forEach((e) => {
+        const v = e.values[t.id];
+        if (v != null && typeof v !== "boolean") times.push(new Date(e.timestamp).getTime());
+      });
+    });
+    meds.forEach((m) => times.push(new Date(m.timestamp).getTime()));
+    if (times.length === 0) return null;
+    return { minX: Math.min(...times), maxX: Math.max(...times) };
+  }, [activeTrackers, entries, meds]);
+
   const knownMedNames = useMemo(() => [...new Set(meds.map((m) => m.name.trim().toLowerCase()))], [meds]);
   const medCatalogCount = knownMedNames.length;
 
@@ -469,19 +543,20 @@ export default function CareLog() {
     setTrackers((prev) => prev.map((t) => (t.id === id ? { ...t, archived: true } : t)));
   }
 
-  function logValue(trackerId, value, isTemperature) {
-    const now = new Date().toISOString();
+  function logValue(trackerId, value, isTemperature, atTime) {
+    const timestamp = atTime ? new Date(atTime).toISOString() : new Date().toISOString();
     const stored = isTemperature ? toCelsius(value, profile.unitSystem) : value;
-    setEntries((prev) => [...prev, { id: uid(), timestamp: now, values: { [trackerId]: stored } }]);
+    setEntries((prev) => [...prev, { id: uid(), timestamp, values: { [trackerId]: stored } }]);
     setDraftValues((d) => ({ ...d, [trackerId]: undefined }));
   }
 
-  function addMedication() {
+  function addMedication(atTime) {
     const name = medName.trim();
     if (!name) return;
     const isNewDistinct = !knownMedNames.includes(name.toLowerCase());
     if (isNewDistinct && medCatalogCount >= MAX_MEDICATIONS) return;
-    setMeds((prev) => [...prev, { id: uid(), name, dose: medDose.trim(), timestamp: new Date().toISOString() }]);
+    const timestamp = atTime ? new Date(atTime).toISOString() : new Date().toISOString();
+    setMeds((prev) => [...prev, { id: uid(), name, dose: medDose.trim(), timestamp }]);
     setMedName("");
     setMedDose("");
   }
@@ -510,7 +585,9 @@ export default function CareLog() {
       .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
     lines.push("Medications:");
     if (recentMeds.length === 0) lines.push("  none logged");
-    else recentMeds.forEach((m) => lines.push(`  ${fmtTime(m.timestamp)} — ${m.name}${m.dose ? " " + m.dose : ""}`));
+    else groupMedsByDisplayTime(recentMeds).forEach((g) =>
+      lines.push(`  ${g.label} — ${g.items.map(medLabel).join(", ")}`)
+    );
     return lines.join("\n");
   }, [activeTrackers, entries, meds]);
 
@@ -705,9 +782,11 @@ export default function CareLog() {
                 series={trackerSeries(t.id)}
                 latest={latestEntryFor(t.id)}
                 unitSystem={profile.unitSystem}
+                meds={meds}
+                domain={chartDomain}
                 draftValue={draftValues[t.id]}
                 onDraftChange={(v) => setDraftValues((d) => ({ ...d, [t.id]: v }))}
-                onLog={(v) => logValue(t.id, v, t.type === "temperature")}
+                onLog={(v, atTime) => logValue(t.id, v, t.type === "temperature", atTime)}
                 onArchive={() => archiveTracker(t.id)}
               />
             ))}
@@ -773,8 +852,10 @@ function Field({ label, children }) {
   );
 }
 
-function TrackerCard({ tracker, series, latest, unitSystem, draftValue, onDraftChange, onLog, onArchive }) {
+function TrackerCard({ tracker, series, latest, unitSystem, meds, domain, draftValue, onDraftChange, onLog, onArchive }) {
   const unitLabel = tracker.type === "temperature" ? tempUnitLabel(unitSystem) : null;
+  const [customTime, setCustomTime] = useState(null); // null = log at "now" (the fast default)
+  const logAt = (value) => onLog(value, customTime);
   return (
     <div style={{ background: card, border: `1px solid ${border}`, borderRadius: 16, padding: 14, marginBottom: 12 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
@@ -785,7 +866,7 @@ function TrackerCard({ tracker, series, latest, unitSystem, draftValue, onDraftC
       </div>
 
       <div style={{ display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap" }}>
-        <Sparkline points={series} kind={tracker.type} unitSystem={unitSystem} scaleMax={tracker.scaleMax} />
+        <Sparkline points={series} kind={tracker.type} unitSystem={unitSystem} scaleMax={tracker.scaleMax} meds={tracker.type !== "boolean" ? meds : null} domain={domain} />
         <div style={{ flex: 1, minWidth: 140 }}>
           {tracker.type === "temperature" && (
             <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
@@ -799,7 +880,7 @@ function TrackerCard({ tracker, series, latest, unitSystem, draftValue, onDraftC
                 style={{ ...inputStyle, width: 90 }}
               />
               <span style={{ fontSize: 13, color: inkSoft }}>{unitLabel}</span>
-              <button style={primaryBtnSmall} onClick={() => draftValue !== undefined && draftValue !== "" && onLog(draftValue)}>
+              <button style={primaryBtnSmall} onClick={() => draftValue !== undefined && draftValue !== "" && logAt(draftValue)}>
                 Log
               </button>
             </div>
@@ -807,16 +888,38 @@ function TrackerCard({ tracker, series, latest, unitSystem, draftValue, onDraftC
           {tracker.type === "scale" && (
             <div style={{ display: "flex", gap: 6 }}>
               {Array.from({ length: (tracker.scaleMax || 5) + 1 }, (_, n) => n).map((n) => (
-                <button key={n} style={scaleBtn} onClick={() => onLog(n)}>{n}</button>
+                <button key={n} style={scaleBtn} onClick={() => logAt(n)}>{n}</button>
               ))}
             </div>
           )}
           {tracker.type === "boolean" && (
             <div style={{ display: "flex", gap: 8 }}>
-              <button style={{ ...scaleBtn, width: "auto", padding: "8px 14px" }} onClick={() => onLog(true)}>Present</button>
-              <button style={{ ...scaleBtn, width: "auto", padding: "8px 14px" }} onClick={() => onLog(false)}>Absent</button>
+              <button style={{ ...scaleBtn, width: "auto", padding: "8px 14px" }} onClick={() => logAt(true)}>Present</button>
+              <button style={{ ...scaleBtn, width: "auto", padding: "8px 14px" }} onClick={() => logAt(false)}>Absent</button>
             </div>
           )}
+
+          {customTime === null ? (
+            <button
+              onClick={() => setCustomTime(nowForInput())}
+              style={{ background: "none", border: "none", color: blue, fontSize: 12, fontWeight: 600, padding: "6px 0 0", cursor: "pointer" }}
+            >
+              Log for a different time
+            </button>
+          ) : (
+            <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6 }}>
+              <input
+                type="datetime-local"
+                value={customTime}
+                onChange={(e) => setCustomTime(e.target.value)}
+                style={{ ...inputStyle, padding: "6px 8px", fontSize: 12, flex: 1 }}
+              />
+              <button onClick={() => setCustomTime(null)} style={{ background: "none", border: "none", color: inkSoft, fontSize: 12, cursor: "pointer" }}>
+                Use now
+              </button>
+            </div>
+          )}
+
           {latest && (
             <div style={{ fontSize: 12, color: inkSoft, marginTop: 6 }}>
               Last: {typeof latest.values[tracker.id] === "boolean"
@@ -908,8 +1011,10 @@ function TemplatePicker({ query, setQuery, templates, remainingSlots, openTempla
 
 function MedicationSection({ meds, medName, setMedName, medDose, setMedDose, onAdd, onDelete, catalogCount, knownMedNames }) {
   const sorted = [...meds].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp)).slice(0, 6);
+  const grouped = groupMedsByDisplayTime(sorted);
   const isNewDistinct = medName.trim() && !knownMedNames.includes(medName.trim().toLowerCase());
   const atCap = isNewDistinct && catalogCount >= MAX_MEDICATIONS;
+  const [customTime, setCustomTime] = useState(null); // null = log at "now" (the fast default)
   return (
     <div style={{ background: card, border: `1px solid ${border}`, borderRadius: 16, padding: 14, marginTop: 20, marginBottom: 16 }}>
       <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 10 }}>Medications</div>
@@ -920,17 +1025,49 @@ function MedicationSection({ meds, medName, setMedName, medDose, setMedDose, onA
       {atCap && (
         <div style={{ ...errorStyle, marginBottom: 8 }}>Free plan: 15 medications tracked. Delete an unused one to add a new name.</div>
       )}
-      <button style={{ ...primaryBtnSmall, opacity: !medName.trim() || atCap ? 0.5 : 1 }} disabled={!medName.trim() || atCap} onClick={onAdd}>
+      {customTime === null ? (
+        <button
+          onClick={() => setCustomTime(nowForInput())}
+          style={{ background: "none", border: "none", color: blue, fontSize: 12, fontWeight: 600, padding: "0 0 8px", cursor: "pointer", display: "block" }}
+        >
+          Log for a different time
+        </button>
+      ) : (
+        <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8 }}>
+          <input
+            type="datetime-local"
+            value={customTime}
+            onChange={(e) => setCustomTime(e.target.value)}
+            style={{ ...inputStyle, padding: "6px 8px", fontSize: 12, flex: 1 }}
+          />
+          <button onClick={() => setCustomTime(null)} style={{ background: "none", border: "none", color: inkSoft, fontSize: 12, cursor: "pointer" }}>
+            Use now
+          </button>
+        </div>
+      )}
+      <button
+        style={{ ...primaryBtnSmall, opacity: !medName.trim() || atCap ? 0.5 : 1 }}
+        disabled={!medName.trim() || atCap}
+        onClick={() => { onAdd(customTime); setCustomTime(null); }}
+      >
         Add medication
       </button>
-      {sorted.length > 0 && (
+      {grouped.length > 0 && (
         <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid ${paperDark}` }}>
-          {sorted.map((m) => (
-            <div key={m.id} style={{ display: "flex", justifyContent: "space-between", padding: "6px 0" }}>
-              <div style={{ fontSize: 14 }}>
-                {m.name}{m.dose ? ` · ${m.dose}` : ""} <span style={{ color: inkSoft, fontSize: 12 }}>· {fmtTime(m.timestamp)}</span>
+          {grouped.map((g) => (
+            <div key={g.label + g.items[0].id} style={{ padding: "6px 0" }}>
+              <div style={{ color: inkSoft, fontSize: 12, marginBottom: 2 }}>{g.label}</div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 4, alignItems: "center" }}>
+                {g.items.map((m, i) => (
+                  <span key={m.id} style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 14 }}>
+                    {i > 0 && <span style={{ color: inkSoft }}>,</span>}
+                    {medLabel(m)}
+                    <button aria-label={`Delete ${medLabel(m)}`} style={{ ...iconBtn, padding: 2 }} onClick={() => onDelete(m.id)}>
+                      <Trash2 size={12} color={inkSoft} />
+                    </button>
+                  </span>
+                ))}
               </div>
-              <button aria-label="Delete" style={iconBtn} onClick={() => onDelete(m.id)}><Trash2 size={14} color={inkSoft} /></button>
             </div>
           ))}
         </div>
