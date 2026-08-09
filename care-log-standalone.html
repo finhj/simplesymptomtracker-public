@@ -1921,6 +1921,7 @@ function TrackerCard({ tracker, series, latest, history, unitSystem, meds, treat
   const [editValue, setEditValue] = useState(undefined);
   const [editTime, setEditTime] = useState("");
   const [showQuestionnaireForm, setShowQuestionnaireForm] = useState(false);
+  const [collapsed, setCollapsed] = useState(false);
   const logAt = (value) => onLog(value, customTime);
 
   function startEdit(entry) {
@@ -1945,18 +1946,30 @@ function TrackerCard({ tracker, series, latest, history, unitSystem, meds, treat
     if (tracker.type === "temperature") return `${displayTemp(v, unitSystem).toFixed(1)}${unitLabel}`;
     return `${v}`;
   }
+  const lastSummary = latest ? `${formatValue(latest.values[tracker.id])}${unitLabel || ""} · ${fmtTimeShort(latest.timestamp)}` : "No readings yet";
 
   const historyShown = showAllHistory ? history : history.slice(0, 6);
 
   return (
     <div style={{ background: card, border: `1px solid ${border}`, borderRadius: 16, padding: 14, marginBottom: 12 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-        <div style={{ fontSize: 16, fontWeight: 700 }}>{tracker.name}</div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: collapsed ? 0 : 8 }}>
+        <button
+          onClick={() => setCollapsed((c) => !c)}
+          style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", padding: 0, cursor: "pointer", textAlign: "left" }}
+        >
+          <ChevronLeft size={16} color={inkSoft} style={{ transform: collapsed ? "rotate(-90deg)" : "rotate(-90deg) scaleY(-1)", flexShrink: 0 }} />
+          <div>
+            <div style={{ fontSize: 16, fontWeight: 700 }}>{tracker.name}</div>
+            {collapsed && <div style={{ fontSize: 12, color: inkSoft }}>{lastSummary}</div>}
+          </div>
+        </button>
         <button aria-label={`Archive ${tracker.name}`} onClick={onArchive} style={iconBtn}>
           <Trash2 size={16} color={inkSoft} />
         </button>
       </div>
 
+      {!collapsed && (
+      <>
       <div style={{ display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap" }}>
         <Sparkline points={series} kind={tracker.type} unitSystem={unitSystem} scaleMax={tracker.scaleMax} meds={tracker.type !== "boolean" ? meds : null} treatments={tracker.type !== "boolean" ? treatments : null} flaggedPeriods={flaggedPeriods} domain={domain} onViewChange={onViewChange} />
         <div style={{ flex: 1, minWidth: 140 }}>
@@ -2180,6 +2193,8 @@ function TrackerCard({ tracker, series, latest, history, unitSystem, meds, treat
             </div>
           )}
         </div>
+      )}
+      </>
       )}
     </div>
   );
@@ -2500,6 +2515,7 @@ function MedicationSection({ meds, medName, setMedName, medDose, setMedDose, onA
   const [editName, setEditName] = useState("");
   const [editDose, setEditDose] = useState("");
   const [editTime, setEditTime] = useState("");
+  const [collapsed, setCollapsed] = useState(false);
 
   function startEdit(m) {
     setEditingMedId(m.id);
@@ -2521,7 +2537,15 @@ function MedicationSection({ meds, medName, setMedName, medDose, setMedDose, onA
 
   return (
     <div style={{ background: card, border: `1px solid ${border}`, borderRadius: 16, padding: 14, marginTop: 20, marginBottom: 16 }}>
-      <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 10 }}>Medications</div>
+      <button
+        onClick={() => setCollapsed((c) => !c)}
+        style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", padding: 0, cursor: "pointer", marginBottom: collapsed ? 0 : 10 }}
+      >
+        <ChevronLeft size={16} color={inkSoft} style={{ transform: collapsed ? "rotate(-90deg)" : "rotate(-90deg) scaleY(-1)", flexShrink: 0 }} />
+        <div style={{ fontSize: 16, fontWeight: 700 }}>Medications{collapsed && meds.length > 0 ? ` (${meds.length})` : ""}</div>
+      </button>
+      {!collapsed && (
+      <>
       <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
         <input placeholder="Ibuprofen" value={medName} onChange={(e) => setMedName(e.target.value)} style={{ ...inputStyle, flex: 1.4 }} />
         <input placeholder="200 mg" value={medDose} onChange={(e) => setMedDose(e.target.value)} style={{ ...inputStyle, flex: 1 }} />
@@ -2600,6 +2624,8 @@ function MedicationSection({ meds, medName, setMedName, medDose, setMedDose, onA
           ))}
         </div>
       )}
+      </>
+      )}
     </div>
   );
 }
@@ -2612,6 +2638,7 @@ function TreatmentSection({ treatments, treatmentName, setTreatmentName, treatme
   const [editName, setEditName] = useState("");
   const [editDetail, setEditDetail] = useState("");
   const [editTime, setEditTime] = useState("");
+  const [collapsed, setCollapsed] = useState(false);
 
   function startEdit(t) {
     setEditingId(t.id);
@@ -2633,7 +2660,15 @@ function TreatmentSection({ treatments, treatmentName, setTreatmentName, treatme
 
   return (
     <div style={{ background: card, border: `1px solid ${border}`, borderRadius: 16, padding: 14, marginTop: 20, marginBottom: 16 }}>
-      <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 4 }}>Treatments</div>
+      <button
+        onClick={() => setCollapsed((c) => !c)}
+        style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", padding: 0, cursor: "pointer", marginBottom: collapsed ? 0 : 4 }}
+      >
+        <ChevronLeft size={16} color={inkSoft} style={{ transform: collapsed ? "rotate(-90deg)" : "rotate(-90deg) scaleY(-1)", flexShrink: 0 }} />
+        <div style={{ fontSize: 16, fontWeight: 700 }}>Treatments{collapsed && treatments.length > 0 ? ` (${treatments.length})` : ""}</div>
+      </button>
+      {!collapsed && (
+      <>
       <p style={{ fontSize: 12, color: inkSoft, margin: "0 0 10px" }}>
         ECT, ketamine or chemo infusions, physical therapy, or anything else administered rather than self-taken.
       </p>
@@ -2711,6 +2746,8 @@ function TreatmentSection({ treatments, treatmentName, setTreatmentName, treatme
             </div>
           ))}
         </div>
+      )}
+      </>
       )}
     </div>
   );
