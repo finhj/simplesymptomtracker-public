@@ -1,0 +1,16 @@
+{
+  "name": "Care Log",
+  "short_name": "Care Log",
+  "description": "A private, local-only symptom and medication tracker. Your data never leaves this device unless you export it yourself.",
+  "start_url": "./care-log-standalone.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#F7F4EE",
+  "theme_color": "#232320",
+  "orientation": "portrait",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
