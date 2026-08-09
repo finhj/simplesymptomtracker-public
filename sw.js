@@ -1,6 +1,6 @@
 // Care Log service worker — caches the app shell so it works offline after first load.
 // Bump CACHE_NAME when the app changes so old caches get cleared out.
-const CACHE_NAME = "care-log-shell-v1";
+const CACHE_NAME = "care-log-shell-v2";
 const APP_SHELL = [
   "./care-log-standalone.html",
   "./manifest.json",
@@ -8,7 +8,7 @@ const APP_SHELL = [
   "./icon-512.png",
   "https://unpkg.com/react@18/umd/react.production.min.js",
   "https://unpkg.com/react-dom@18/umd/react-dom.production.min.js",
-  "https://unpkg.com/@babel/standalone/babel.min.js",
+  "https://unpkg.com/@babel/standalone@7/babel.min.js",
 ];
 
 self.addEventListener("install", (event) => {
@@ -32,4 +32,21 @@ self.addEventListener("activate", (event) => {
 });
 
 // Cache-first: serve from cache when available (fast, works offline), fall back to
-// network, and quietly update the cache in the background when onli
+// network, and quietly update the cache in the background when online.
+self.addEventListener("fetch", (event) => {
+  if (event.request.method !== "GET") return;
+  event.respondWith(
+    caches.match(event.request).then((cached) => {
+      const networkFetch = fetch(event.request)
+        .then((response) => {
+          if (response && response.status === 200) {
+            const clone = response.clone();
+            caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
+          }
+          return response;
+        })
+        .catch(() => cached); // offline and not cached — nothing more we can do
+      return cached || networkFetch;
+    })
+  );
+});

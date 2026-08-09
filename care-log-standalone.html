@@ -11,17 +11,9 @@
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 <meta name="apple-mobile-web-app-title" content="Care Log" />
-<!--
-  Standalone build. No build step, no npm, no server — open this file's hosted URL and it runs.
-  Data is stored ONLY in this browser's localStorage, encrypted with a passcode you set on first
-  use. Nothing is sent anywhere. Works offline once loaded (service worker caches the app shell).
-  Must be served over HTTPS (e.g. GitHub Pages) or via a real localhost dev server — the Web
-  Crypto API used for encryption is not guaranteed to work if you double-click this file and open
-  it directly as a file:// URL in some browsers.
--->
 <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
 <style>
   html, body { margin: 0; padding: 0; background: #F7F4EE; }
 </style>
@@ -29,17 +21,11 @@
 <body>
 <div id="root"></div>
 <script>
-  // Register the service worker for offline support. Failing silently here is fine —
-  // the app still works fully online, this only adds offline capability.
   if ("serviceWorker" in navigator) {
     window.addEventListener("load", () => {
       navigator.serviceWorker.register("sw.js").catch((e) => console.error("care-log: sw registration failed", e));
     });
   }
-  // Ask the browser not to evict this site's storage under storage pressure. This is a
-  // request, not a guarantee — browsers grant it more reliably once the app is actually
-  // installed to the home screen, which is exactly why installing (not just bookmarking)
-  // matters for reliability.
   if (navigator.storage && navigator.storage.persist) {
     navigator.storage.persist().catch(() => {});
   }
@@ -47,7 +33,6 @@
 <script type="text/babel" data-presets="react">
 const { useState, useEffect, useMemo, useCallback, useRef } = React;
 
-// ---------- Minimal inline-SVG icon stand-ins (no external icon library — fewer dependencies, faster load) ----------
 function Icon({ children, size = 16, color = "currentColor", style }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color}
@@ -66,9 +51,6 @@ function Trash2(props) { return <Icon {...props}><polyline points="3 6 5 6 21 6"
 function FileText(props) { return <Icon {...props}><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /></Icon>; }
 function Copy(props) { return <Icon {...props}><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></Icon>; }
 
-// ---------- Local storage backend (real browser storage — no dependency on any external
-// service, which is the whole point: this removes the class of failure that caused the
-// earlier data-loss incident with Claude's artifact storage backend). ----------
 const LocalStore = {
   async get(key) {
     const v = localStorage.getItem(key);
@@ -237,12 +219,32 @@ function fmtTime(iso) {
 function fmtTimeShort(iso) {
   return new Date(iso).toLocaleString(undefined, { hour: "numeric", minute: "2-digit" });
 }
+// Groups meds that display at the same minute (e.g. two given together) into one
+// row instead of repeating the timestamp — "3:15 PM — Ibuprofen 200mg, Tylenol 500mg"
+// rather than two separate lines. Grouping by the *displayed* time (not raw timestamp)
+// means it works even if the two were logged a few seconds apart in separate taps.
+function groupMedsByDisplayTime(sortedMeds) {
+  const groups = [];
+  for (const m of sortedMeds) {
+    const label = fmtTime(m.timestamp);
+    const last = groups[groups.length - 1];
+    if (last && last.label === label) {
+      last.items.push(m);
+    } else {
+      groups.push({ label, items: [m] });
+    }
+  }
+  return groups;
+}
+function medLabel(m) {
+  return m.name + (m.dose ? ` ${m.dose}` : "");
+}
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
 // ---------- Lightweight sparkline (no chart library — fast load) ----------
-function Sparkline({ points, kind, unitSystem, scaleMax }) {
+function Sparkline({ points, kind, unitSystem, scaleMax, meds, domain }) {
   const width = 260, height = 56, pad = 6;
   const chartLeft = 34; // reserve space for axis labels
   const plotWidth = width - chartLeft;
@@ -255,14 +257,30 @@ function Sparkline({ points, kind, unitSystem, scaleMax }) {
   const feverLine = kind === "temperature" ? displayTemp(FEVER_C, unitSystem) : null;
   const unit = kind === "temperature" ? tempUnitLabel(unitSystem) : "";
   const xs = display.map((p) => p.t);
-  const minX = Math.min(...xs), maxX = Math.max(...xs);
-  const scaleX = (t) => (xs.length > 1 ? ((t - minX) / (maxX - minX || 1)) * (plotWidth - pad * 2) + pad + chartLeft : plotWidth / 2 + chartLeft);
+  // Prefer the shared domain (same timeline across every tracker + med chart) — fall
+  // back to this chart's own data only if no shared domain was supplied.
+  const minX = domain ? domain.minX : Math.min(...xs);
+  const maxX = domain ? domain.maxX : Math.max(...xs);
+  const scaleX = (t) => ((t - minX) / (maxX - minX || 1)) * (plotWidth - pad * 2) + pad + chartLeft;
   const scaleY = (v) => height - pad - ((v - minY) / (maxY - minY)) * (height - pad * 2);
   const d = display.map((p, i) => `${i === 0 ? "M" : "L"} ${scaleX(p.t).toFixed(1)} ${scaleY(p.v).toFixed(1)}`).join(" ");
   const last = display[display.length - 1];
   const axisLabelStyle = { fontSize: 9, fill: inkSoft, fontFamily: "-apple-system, sans-serif" };
+
+  // Medications logged within this chart's visible time range, shown as a bullet
+  // with a diagonal label rising from it — same concept as the earlier fever-tracker
+  // prototype, rebuilt for this lightweight hand-drawn chart (no chart library).
+  const medSpan = Math.max(maxX - minX, 1);
+  const medPad = medSpan * 0.05;
+  const chartMeds = (meds || [])
+    .map((m) => ({ ...m, t: new Date(m.timestamp).getTime() }))
+    .filter((m) => m.t >= minX - medPad && m.t <= maxX + medPad)
+    .sort((a, b) => a.t - b.t);
+  const baseY = height - pad;
+
   return (
-    <svg width={width} height={height} role="img" aria-label={`Trend chart, scale ${minY} to ${maxY}${unit}, latest value ${last.v.toFixed(1)}${unit}`}>
+    <svg width={width} height={height + (chartMeds.length ? 30 : 0)} role="img"
+      aria-label={`Trend chart, scale ${minY} to ${maxY}${unit}, latest value ${last.v.toFixed(1)}${unit}${chartMeds.length ? `. Medications in range: ${chartMeds.map(medLabel).join(", ")}` : ""}`}>
       {kind === "temperature" && (
         <rect x={chartLeft} y={scaleY(feverLine)} width={plotWidth} height={Math.max(scaleY(maxY) - scaleY(feverLine), 0)} fill={redSoft} opacity={0.5} />
       )}
@@ -276,6 +294,22 @@ function Sparkline({ points, kind, unitSystem, scaleMax }) {
       {display.map((p, i) => (
         <circle key={i} cx={scaleX(p.t)} cy={scaleY(p.v)} r={2.5} fill={kind === "temperature" && p.v >= feverLine ? red : teal} />
       ))}
+      {chartMeds.map((m) => {
+        const x = scaleX(m.t);
+        return (
+          <g key={m.id}>
+            <line x1={x} y1={baseY} x2={x} y2={pad} stroke={blue} strokeOpacity={0.35} strokeDasharray="2 2" />
+            <circle cx={x} cy={baseY} r={3} fill={blue} stroke={card} strokeWidth={1} />
+            <text
+              x={x} y={baseY} transform={`rotate(-55 ${x} ${baseY})`} dx={5} dy={-4}
+              fontSize={9} fontWeight={600} fill={blue}
+              fontFamily="-apple-system, sans-serif"
+            >
+              {medLabel(m)}
+            </text>
+          </g>
+        );
+      })}
     </svg>
   );
 }
@@ -493,6 +527,22 @@ function CareLog() {
   const activeTrackers = useMemo(() => trackers.filter((t) => !t.archived), [trackers]);
   const remainingSlots = MAX_TRACKERS - activeTrackers.length;
 
+  // One shared time domain for every chart, so trackers and medications are always
+  // plotted on the same timeline and can be visually compared side by side, rather
+  // than each card silently picking its own window based on just its own data.
+  const chartDomain = useMemo(() => {
+    const times = [];
+    activeTrackers.forEach((t) => {
+      entries.forEach((e) => {
+        const v = e.values[t.id];
+        if (v != null && typeof v !== "boolean") times.push(new Date(e.timestamp).getTime());
+      });
+    });
+    meds.forEach((m) => times.push(new Date(m.timestamp).getTime()));
+    if (times.length === 0) return null;
+    return { minX: Math.min(...times), maxX: Math.max(...times) };
+  }, [activeTrackers, entries, meds]);
+
   const knownMedNames = useMemo(() => [...new Set(meds.map((m) => m.name.trim().toLowerCase()))], [meds]);
   const medCatalogCount = knownMedNames.length;
 
@@ -596,7 +646,9 @@ function CareLog() {
       .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
     lines.push("Medications:");
     if (recentMeds.length === 0) lines.push("  none logged");
-    else recentMeds.forEach((m) => lines.push(`  ${fmtTime(m.timestamp)} — ${m.name}${m.dose ? " " + m.dose : ""}`));
+    else groupMedsByDisplayTime(recentMeds).forEach((g) =>
+      lines.push(`  ${g.label} — ${g.items.map(medLabel).join(", ")}`)
+    );
     return lines.join("\n");
   }, [activeTrackers, entries, meds]);
 
@@ -791,6 +843,8 @@ function CareLog() {
                 series={trackerSeries(t.id)}
                 latest={latestEntryFor(t.id)}
                 unitSystem={profile.unitSystem}
+                meds={meds}
+                domain={chartDomain}
                 draftValue={draftValues[t.id]}
                 onDraftChange={(v) => setDraftValues((d) => ({ ...d, [t.id]: v }))}
                 onLog={(v) => logValue(t.id, v, t.type === "temperature")}
@@ -859,7 +913,7 @@ function Field({ label, children }) {
   );
 }
 
-function TrackerCard({ tracker, series, latest, unitSystem, draftValue, onDraftChange, onLog, onArchive }) {
+function TrackerCard({ tracker, series, latest, unitSystem, meds, domain, draftValue, onDraftChange, onLog, onArchive }) {
   const unitLabel = tracker.type === "temperature" ? tempUnitLabel(unitSystem) : null;
   return (
     <div style={{ background: card, border: `1px solid ${border}`, borderRadius: 16, padding: 14, marginBottom: 12 }}>
@@ -871,7 +925,7 @@ function TrackerCard({ tracker, series, latest, unitSystem, draftValue, onDraftC
       </div>
 
       <div style={{ display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap" }}>
-        <Sparkline points={series} kind={tracker.type} unitSystem={unitSystem} scaleMax={tracker.scaleMax} />
+        <Sparkline points={series} kind={tracker.type} unitSystem={unitSystem} scaleMax={tracker.scaleMax} meds={tracker.type !== "boolean" ? meds : null} domain={domain} />
         <div style={{ flex: 1, minWidth: 140 }}>
           {tracker.type === "temperature" && (
             <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
@@ -994,6 +1048,7 @@ function TemplatePicker({ query, setQuery, templates, remainingSlots, openTempla
 
 function MedicationSection({ meds, medName, setMedName, medDose, setMedDose, onAdd, onDelete, catalogCount, knownMedNames }) {
   const sorted = [...meds].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp)).slice(0, 6);
+  const grouped = groupMedsByDisplayTime(sorted);
   const isNewDistinct = medName.trim() && !knownMedNames.includes(medName.trim().toLowerCase());
   const atCap = isNewDistinct && catalogCount >= MAX_MEDICATIONS;
   return (
@@ -1009,14 +1064,22 @@ function MedicationSection({ meds, medName, setMedName, medDose, setMedDose, onA
       <button style={{ ...primaryBtnSmall, opacity: !medName.trim() || atCap ? 0.5 : 1 }} disabled={!medName.trim() || atCap} onClick={onAdd}>
         Add medication
       </button>
-      {sorted.length > 0 && (
+      {grouped.length > 0 && (
         <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid ${paperDark}` }}>
-          {sorted.map((m) => (
-            <div key={m.id} style={{ display: "flex", justifyContent: "space-between", padding: "6px 0" }}>
-              <div style={{ fontSize: 14 }}>
-                {m.name}{m.dose ? ` · ${m.dose}` : ""} <span style={{ color: inkSoft, fontSize: 12 }}>· {fmtTime(m.timestamp)}</span>
+          {grouped.map((g) => (
+            <div key={g.label + g.items[0].id} style={{ padding: "6px 0" }}>
+              <div style={{ color: inkSoft, fontSize: 12, marginBottom: 2 }}>{g.label}</div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 4, alignItems: "center" }}>
+                {g.items.map((m, i) => (
+                  <span key={m.id} style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 14 }}>
+                    {i > 0 && <span style={{ color: inkSoft }}>,</span>}
+                    {medLabel(m)}
+                    <button aria-label={`Delete ${medLabel(m)}`} style={{ ...iconBtn, padding: 2 }} onClick={() => onDelete(m.id)}>
+                      <Trash2 size={12} color={inkSoft} />
+                    </button>
+                  </span>
+                ))}
               </div>
-              <button aria-label="Delete" style={iconBtn} onClick={() => onDelete(m.id)}><Trash2 size={14} color={inkSoft} /></button>
             </div>
           ))}
         </div>
