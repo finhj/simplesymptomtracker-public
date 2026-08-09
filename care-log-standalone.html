@@ -429,6 +429,32 @@ function Sparkline({ points, kind, unitSystem, scaleMax, meds, treatments, flagg
       : dt.toLocaleDateString(undefined, { month: "short", day: "numeric" });
   }
 
+  // Midnight (local time) boundaries within the visible range, so a new day is
+  // visually obvious on a multi-day chart. Capped — past a certain point the lines
+  // would sit close enough together to be visual noise rather than a useful cue,
+  // so this quietly steps back to relying on the start/end axis labels instead.
+  const MAX_DAY_LINES = 10;
+  const dayBoundaries = [];
+  {
+    const firstMidnight = new Date(minX);
+    firstMidnight.setHours(24, 0, 0, 0); // the *next* midnight after minX, not minX's own day
+    for (let t = firstMidnight.getTime(); t < maxX; t += 24 * 3600 * 1000) {
+      dayBoundaries.push(t);
+      if (dayBoundaries.length > MAX_DAY_LINES) break;
+    }
+  }
+  const showDayLines = dayBoundaries.length > 0 && dayBoundaries.length <= MAX_DAY_LINES;
+  // Alternating background shading between days — every other day segment (using
+  // the same boundaries as the dotted lines) gets a faint neutral tint, giving a
+  // "zebra stripe" rhythm across the timeline without needing any text labels.
+  const daySegments = showDayLines
+    ? [minX, ...dayBoundaries, maxX].slice(0, -1).map((t, i, arr) => ({
+        x1: scaleX(t),
+        x2: scaleX(i + 1 < arr.length ? arr[i + 1] : maxX),
+        shaded: i % 2 === 1,
+      }))
+    : [];
+
   // ---------- Pinch-to-zoom / drag-to-pan ----------
   // Uses refs (not state) to track an in-progress gesture so intermediate touchmove
   // events don't each trigger a full re-render — only the resulting domain change does,
@@ -571,7 +597,15 @@ function Sparkline({ points, kind, unitSystem, scaleMax, meds, treatments, flagg
         onTouchCancel={handleTouchEnd}
         role="img"
         aria-label={`Trend chart from ${fmtAxisTime(minX)} to ${fmtAxisTime(maxX)}, scale ${minY} to ${maxY}${unit}, latest value ${last.v.toFixed(1)}${unit}${staggeredMeds.length ? `. Medications in range: ${staggeredMeds.map(medLabel).join("; ")}` : ""}${flaggedPeriodBands.length ? `. Flagged periods: ${flaggedPeriodBands.map((p) => p.label).join("; ")}` : ""}`}>
-        {/* Flagged periods (relapses, flares, etc.) render first, as a background band
+        {/* Alternating day shading renders first, as the bottom-most layer — a faint
+            neutral rhythm marking calendar days, never competing with the fever band,
+            flagged periods, or the data itself for visual attention. */}
+        {daySegments.map((s, i) =>
+          s.shaded ? (
+            <rect key={i} x={s.x1} y={pad} width={Math.max(s.x2 - s.x1, 0)} height={height - pad * 2} fill={border} opacity={0.25} />
+          ) : null
+        )}
+        {/* Flagged periods (relapses, flares, etc.) render next, as a background band
             behind everything else — a labeled stretch of time, not a specific reading. */}
         {flaggedPeriodBands.map((p) => (
           <g key={p.id}>
@@ -580,6 +614,15 @@ function Sparkline({ points, kind, unitSystem, scaleMax, meds, treatments, flagg
               {p.label}
             </text>
           </g>
+        ))}
+        {/* Dotted lines mark the exact day boundary, on top of the shading but still
+            behind the actual data line and points. */}
+        {showDayLines && dayBoundaries.map((t) => (
+          <line
+            key={t}
+            x1={scaleX(t)} y1={pad} x2={scaleX(t)} y2={height - pad}
+            stroke={inkSoft} strokeWidth={1} strokeDasharray="2 3" opacity={0.6}
+          />
         ))}
         {kind === "temperature" && (
           <rect x={chartLeft} y={scaleY(feverLine)} width={plotWidth} height={Math.max(scaleY(maxY) - scaleY(feverLine), 0)} fill={redSoft} opacity={0.5} />
