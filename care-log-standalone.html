@@ -274,19 +274,37 @@ function Sparkline({ points, kind, unitSystem, scaleMax, meds, domain }) {
   const axisLabelStyle = { fontSize: 9, fill: inkSoft, fontFamily: "-apple-system, sans-serif" };
 
   // Medications logged within this chart's visible time range, shown as a bullet
-  // with a diagonal label rising from it — same concept as the earlier fever-tracker
-  // prototype, rebuilt for this lightweight hand-drawn chart (no chart library).
+  // with a diagonal label rising from it. Grouped by displayed minute first (same
+  // grouping used in the medication list) so two meds given together produce one
+  // combined label instead of two overlapping ones. Markers that still land close
+  // together in pixel space (different times, similar chart position) get staggered
+  // vertically so their diagonal lines don't run through each other.
   const medSpan = Math.max(maxX - minX, 1);
   const medPad = medSpan * 0.05;
-  const chartMeds = (meds || [])
+  const medsInRange = (meds || [])
     .map((m) => ({ ...m, t: new Date(m.timestamp).getTime() }))
     .filter((m) => m.t >= minX - medPad && m.t <= maxX + medPad)
     .sort((a, b) => a.t - b.t);
+  const chartMedGroups = groupMedsByDisplayTime(medsInRange).map((g) => ({
+    label: g.items.map(medLabel).join(", "),
+    t: g.items[0].t,
+    id: g.items[0].id,
+  }));
   const baseY = height - pad;
+  const MIN_MARKER_GAP_PX = 26;
+  let lastX = -Infinity;
+  let stagger = 0;
+  const staggeredMeds = chartMedGroups.map((g) => {
+    const x = scaleX(g.t);
+    stagger = x - lastX < MIN_MARKER_GAP_PX ? stagger + 1 : 0;
+    lastX = x;
+    return { ...g, x, extraLift: stagger * 10 };
+  });
+  const chartHeight = staggeredMeds.length ? height + 30 + Math.max(...staggeredMeds.map((m) => m.extraLift), 0) : height;
 
   return (
-    <svg width={width} height={height + (chartMeds.length ? 30 : 0)} role="img"
-      aria-label={`Trend chart, scale ${minY} to ${maxY}${unit}, latest value ${last.v.toFixed(1)}${unit}${chartMeds.length ? `. Medications in range: ${chartMeds.map(medLabel).join(", ")}` : ""}`}>
+    <svg width={width} height={chartHeight} role="img"
+      aria-label={`Trend chart, scale ${minY} to ${maxY}${unit}, latest value ${last.v.toFixed(1)}${unit}${staggeredMeds.length ? `. Medications in range: ${staggeredMeds.map((m) => m.label).join("; ")}` : ""}`}>
       {kind === "temperature" && (
         <rect x={chartLeft} y={scaleY(feverLine)} width={plotWidth} height={Math.max(scaleY(maxY) - scaleY(feverLine), 0)} fill={redSoft} opacity={0.5} />
       )}
@@ -300,22 +318,19 @@ function Sparkline({ points, kind, unitSystem, scaleMax, meds, domain }) {
       {display.map((p, i) => (
         <circle key={i} cx={scaleX(p.t)} cy={scaleY(p.v)} r={2.5} fill={kind === "temperature" && p.v >= feverLine ? red : teal} />
       ))}
-      {chartMeds.map((m) => {
-        const x = scaleX(m.t);
-        return (
-          <g key={m.id}>
-            <line x1={x} y1={baseY} x2={x} y2={pad} stroke={blue} strokeOpacity={0.35} strokeDasharray="2 2" />
-            <circle cx={x} cy={baseY} r={3} fill={blue} stroke={card} strokeWidth={1} />
-            <text
-              x={x} y={baseY} transform={`rotate(-55 ${x} ${baseY})`} dx={5} dy={-4}
-              fontSize={9} fontWeight={600} fill={blue}
-              fontFamily="-apple-system, sans-serif"
-            >
-              {medLabel(m)}
-            </text>
-          </g>
-        );
-      })}
+      {staggeredMeds.map((m) => (
+        <g key={m.id}>
+          <line x1={m.x} y1={baseY} x2={m.x} y2={pad - m.extraLift} stroke={blue} strokeOpacity={0.35} strokeDasharray="2 2" />
+          <circle cx={m.x} cy={baseY} r={3} fill={blue} stroke={card} strokeWidth={1} />
+          <text
+            x={m.x} y={baseY - m.extraLift} transform={`rotate(-55 ${m.x} ${baseY - m.extraLift})`} dx={5} dy={-4}
+            fontSize={9} fontWeight={600} fill={blue}
+            fontFamily="-apple-system, sans-serif"
+          >
+            {m.label}
+          </text>
+        </g>
+      ))}
     </svg>
   );
 }
