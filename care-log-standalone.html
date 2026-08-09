@@ -66,6 +66,10 @@ const LocalStore = {
       return null;
     }
   },
+  async delete(key) {
+    localStorage.removeItem(key);
+    return { key, deleted: true };
+  },
 };
 
 
@@ -687,6 +691,7 @@ function Sparkline({ points, kind, unitSystem, scaleMax, meds, treatments, flagg
 function CareLog() {
   const [phase, setPhase] = useState("loading"); // loading | setup | locked | ready
   const [errorMsg, setErrorMsg] = useState("");
+  const [showForgotPasscode, setShowForgotPasscode] = useState(false);
   const [passcodeInput, setPasscodeInput] = useState("");
   const [passcodeConfirm, setPasscodeConfirm] = useState("");
 
@@ -876,6 +881,34 @@ function CareLog() {
     } catch (e) {
       setErrorMsg("Incorrect passcode. Try again.");
     }
+  }
+
+  // A forgotten passcode makes the existing vault permanently unreadable — that's
+  // the zero-knowledge design working as intended, not a bug, and nothing here
+  // changes that. This just clears the now-inaccessible encrypted data so the app
+  // isn't a dead end, and returns to first-run setup for a genuinely new passcode.
+  async function startFresh() {
+    try {
+      await LocalStore.delete(STORAGE_KEY, false);
+    } catch (e) {
+      console.error("care-log: failed to clear vault on start-fresh", e);
+    }
+    cryptoKeyRef.current = null;
+    saltRef.current = null;
+    setTrackers([]);
+    setEntries([]);
+    setMeds([]);
+    setConcerns([]);
+    setCustomTrackerDefs([]);
+    setFlaggedPeriods([]);
+    setTreatments([]);
+    setNotes([]);
+    setProfile({ ageYears: "", ageMonths: "", ethnicity: "", unitSystem: "imperial" });
+    setPasscodeInput("");
+    setErrorMsg("");
+    setShowForgotPasscode(false);
+    skippedInitialPersist.current = false;
+    setPhase("setup");
   }
 
   // ---------- Backup export / restore ----------
@@ -1561,6 +1594,35 @@ function CareLog() {
         </Field>
         {errorMsg && <div style={errorStyle}>{errorMsg}</div>}
         <button style={primaryBtn} onClick={handleUnlock}>Unlock</button>
+
+        {!showForgotPasscode ? (
+          <button
+            onClick={() => setShowForgotPasscode(true)}
+            style={{ background: "none", border: "none", color: inkSoft, fontSize: 13, cursor: "pointer", display: "block", margin: "16px auto 0", textDecoration: "underline" }}
+          >
+            Forgot your passcode?
+          </button>
+        ) : (
+          <div style={{ background: redSoft, border: `1px solid ${red}`, borderRadius: 12, padding: 12, marginTop: 16 }}>
+            <p style={{ fontSize: 13, color: ink, margin: "0 0 8px", fontWeight: 600 }}>
+              There's no way to recover a forgotten passcode — that's the zero-knowledge design working as intended, not something we can override.
+            </p>
+            <p style={{ fontSize: 13, color: ink, margin: "0 0 10px" }}>
+              Starting fresh permanently erases the data currently on this device — it's already unreadable without the right passcode, so nothing accessible is being lost, but this makes that permanent. This can't be undone.
+            </p>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button style={{ ...primaryBtnSmall, background: red }} onClick={startFresh}>
+                Erase and start fresh
+              </button>
+              <button
+                onClick={() => setShowForgotPasscode(false)}
+                style={{ background: "none", border: "none", color: inkSoft, fontSize: 13, cursor: "pointer" }}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
       </Screen>
     );
   }
