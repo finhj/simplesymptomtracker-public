@@ -365,6 +365,20 @@ function Sparkline({ points, kind, unitSystem, scaleMax, meds, domain, onViewCha
     lastX = x;
     return { ...g, x, extraLift: stagger * 6 };
   });
+  // Only label points when there aren't too many, so a busy chart doesn't turn into
+  // the same overlapping-text problem the medication markers had.
+  const showValueLabels = kind === "temperature" && display.length > 0 && display.length <= 8;
+  let lastLabelX = -Infinity;
+  let labelBelow = false;
+  const valueLabels = showValueLabels
+    ? display.map((p) => {
+        const x = scaleX(p.t);
+        labelBelow = x - lastLabelX < 26 ? !labelBelow : false;
+        lastLabelX = x;
+        return { x, y: scaleY(p.v), value: p.v, below: labelBelow };
+      })
+    : [];
+
   const AXIS_ROW_HEIGHT = 14;
   const chartHeight = (staggeredMeds.length ? height + 10 + Math.max(...staggeredMeds.map((m) => m.extraLift), 0) : height) + AXIS_ROW_HEIGHT;
   const medDark = "#33506E"; // darker than the standard blue accent, for better contrast at small sizes
@@ -398,6 +412,29 @@ function Sparkline({ points, kind, unitSystem, scaleMax, meds, domain, onViewCha
         <path d={d} fill="none" stroke={ink} strokeWidth={1.5} />
         {display.map((p, i) => (
           <circle key={i} cx={scaleX(p.t)} cy={scaleY(p.v)} r={2.5} fill={kind === "temperature" && p.v >= feverLine ? red : teal} />
+        ))}
+        {/* Temperature values written next to each point — only while there are few
+            enough points to stay readable. A dense chart (many readings in view) skips
+            the numbers rather than risk the same overlap/cutoff problems the medication
+            labels had; the dots and line are still there, and a narrower range preset
+            or a pinch-zoom brings the numbers back. */}
+        {valueLabels.map((l, i) => (
+          <g key={i}>
+            <text
+              x={l.x} y={l.below ? l.y + 14 : l.y - 6} textAnchor="middle"
+              fontSize={10} fontWeight={700} fill="none" stroke={card} strokeWidth={3} strokeLinejoin="round"
+              fontFamily="-apple-system, sans-serif"
+            >
+              {l.value.toFixed(1)}
+            </text>
+            <text
+              x={l.x} y={l.below ? l.y + 14 : l.y - 6} textAnchor="middle"
+              fontSize={10} fontWeight={700} fill={ink}
+              fontFamily="-apple-system, sans-serif"
+            >
+              {l.value.toFixed(1)}
+            </text>
+          </g>
         ))}
         {/* Bullets only — no on-chart text. Cut-off, overlapping, and hard-to-read
             labels were all symptoms of trying to render full names diagonally in a
