@@ -1,1 +1,85 @@
+name: Scheduled Security Scan
 
+on:
+  schedule:
+    - cron: "0 13 * * 1"
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  codeql:
+    name: CodeQL static analysis
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: javascript-typescript
+      - uses: github/codeql-action/analyze@v3
+
+  semgrep:
+    name: Semgrep static analysis
+    runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Semgrep
+        run: semgrep ci --config auto --json --output semgrep-results.json
+        continue-on-error: true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: semgrep-report
+          path: semgrep-results.json
+
+  dependency-audit:
+    name: npm dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: npm ci
+      - name: Audit dependencies
+        run: npm audit --audit-level=moderate --json > npm-audit-report.json
+        continue-on-error: true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-audit-report
+          path: npm-audit-report.json
+
+  summarize:
+    name: Build combined report
+    needs: [semgrep, dependency-audit]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: reports
+      - name: Combine into one summary
+        run: |
+          echo "# Security scan summary — $(date -u +%Y-%m-%d)" > summary.md
+          echo "" >> summary.md
+          echo "CodeQL results: see the repo's Security tab (published separately by the codeql job)." >> summary.md
+          echo "" >> summary.md
+          echo "## Semgrep" >> summary.md
+          echo '```' >> summary.md
+          cat reports/semgrep-report/semgrep-results.json >> summary.md || echo "no findings file" >> summary.md
+          echo '```' >> summary.md
+          echo "" >> summary.md
+          echo "## npm audit" >> summary.md
+          echo '```' >> summary.md
+          cat reports/npm-audit-report/npm-audit-report.json >> summary.md || echo "no findings file" >> summary.md
+          echo '```' >> summary.md
+      - uses: actions/upload-artifact@v4
+        with:
+          name: weekly-security-summary
+          path: summary.md
