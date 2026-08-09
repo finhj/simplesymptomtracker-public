@@ -281,8 +281,23 @@ function Sparkline({ points, kind, unitSystem, scaleMax, meds, domain, onViewCha
     return <div style={{ fontSize: 12, color: inkSoft, padding: "18px 0" }}>No readings yet</div>;
   }
   const display = kind === "temperature" ? points.map((p) => ({ t: p.t, v: displayTemp(p.v, unitSystem) })) : points;
-  const minY = kind === "temperature" ? (unitSystem === "imperial" ? 95 : 35) : 0;
-  const maxY = kind === "temperature" ? (unitSystem === "imperial" ? 106 : 41) : (scaleMax || 5);
+  let minY, maxY;
+  if (kind === "temperature") {
+    minY = unitSystem === "imperial" ? 95 : 35;
+    maxY = unitSystem === "imperial" ? 106 : 41;
+  } else if (kind === "number") {
+    // No fixed range for a general numeric tracker (unlike severity's fixed 0-max) —
+    // scale to the actual logged values, with padding so the line isn't pinned to the edges.
+    const vals = points.map((p) => p.v);
+    const dataMin = Math.min(...vals);
+    const dataMax = Math.max(...vals);
+    const rangePad = Math.max((dataMax - dataMin) * 0.15, 1);
+    minY = dataMin - rangePad;
+    maxY = dataMax + rangePad;
+  } else {
+    minY = 0;
+    maxY = scaleMax || 5;
+  }
   const feverLine = kind === "temperature" ? displayTemp(FEVER_C, unitSystem) : null;
   const unit = kind === "temperature" ? tempUnitLabel(unitSystem) : "";
   const xs = display.map((p) => p.t);
@@ -549,6 +564,7 @@ function CareLog() {
   const [profileDraft, setProfileDraft] = useState({ ageYears: "", ageMonths: "", ethnicity: "" });
 
   const [showSettings, setShowSettings] = useState(false);
+  const [showEmergencyResources, setShowEmergencyResources] = useState(false);
   const [showBackup, setShowBackup] = useState(false);
   const [restorePasscode, setRestorePasscode] = useState("");
   const [restoreFile, setRestoreFile] = useState(null);
@@ -563,6 +579,12 @@ function CareLog() {
   const [selectedConcernIds, setSelectedConcernIds] = useState([]);
   const [newConcernName, setNewConcernName] = useState("");
   const [dashboardViewMode, setDashboardViewMode] = useState("all"); // "all" | "byConcern"
+
+  const [customTrackerDefs, setCustomTrackerDefs] = useState([]); // [{id, name, type, scaleMax}] — reusable, not tied to any one addition
+  const [showCustomTrackerForm, setShowCustomTrackerForm] = useState(false);
+  const [customTrackerNameInput, setCustomTrackerNameInput] = useState("");
+  const [customTrackerType, setCustomTrackerType] = useState("scale");
+  const [pendingCustomTracker, setPendingCustomTracker] = useState(null); // {name, type, scaleMax, sourceCustomDefinitionId?}
 
   const [draftValues, setDraftValues] = useState({});
   const [medName, setMedName] = useState("");
@@ -597,9 +619,9 @@ function CareLog() {
   }, []);
 
   // ---------- Persist (encrypt + save) ----------
-  const persist = useCallback(async (nextTrackers, nextEntries, nextMeds, nextProfile, nextConcerns) => {
+  const persist = useCallback(async (nextTrackers, nextEntries, nextMeds, nextProfile, nextConcerns, nextCustomDefs) => {
     if (!cryptoKeyRef.current) return;
-    const payload = { trackers: nextTrackers, entries: nextEntries, meds: nextMeds, profile: nextProfile, concerns: nextConcerns };
+    const payload = { trackers: nextTrackers, entries: nextEntries, meds: nextMeds, profile: nextProfile, concerns: nextConcerns, customTrackerDefs: nextCustomDefs };
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
         const { iv, ciphertext } = await encryptJSON(cryptoKeyRef.current, payload);
@@ -623,9 +645,9 @@ function CareLog() {
       skippedInitialPersist.current = true;
       return;
     }
-    persist(trackers, entries, meds, profile, concerns);
+    persist(trackers, entries, meds, profile, concerns, customTrackerDefs);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [trackers, entries, meds, profile, concerns]);
+  }, [trackers, entries, meds, profile, concerns, customTrackerDefs]);
 
   // ---------- Setup (first run — create passcode) ----------
   async function handleCreatePasscode() {
@@ -667,7 +689,7 @@ function CareLog() {
       return;
     }
     try {
-      const { iv, ciphertext } = await encryptJSON(cryptoKeyRef.current, { trackers: [], entries: [], meds: [], profile: nextProfile, concerns: [] });
+      const { iv, ciphertext } = await encryptJSON(cryptoKeyRef.current, { trackers: [], entries: [], meds: [], profile: nextProfile, concerns: [], customTrackerDefs: [] });
       const vault = { saltB64: saltRef.current, iterations: PBKDF2_ITERATIONS, iv, ciphertext };
       const result = await LocalStore.set(STORAGE_KEY, JSON.stringify(vault), false);
       if (!result) throw new Error("storage.set returned no result");
@@ -694,6 +716,7 @@ function CareLog() {
       setEntries(data.entries || []);
       setMeds(data.meds || []);
       setConcerns(data.concerns || []);
+      setCustomTrackerDefs(data.customTrackerDefs || []);
       setProfile(data.profile || { ageYears: "", ageMonths: "", ethnicity: "", unitSystem: "imperial" });
       skippedInitialPersist.current = true;
       setPasscodeInput("");
@@ -706,7 +729,7 @@ function CareLog() {
   // ---------- Backup export / restore ----------
   async function handleExportBackup() {
     if (!cryptoKeyRef.current) return;
-    const payload = { trackers, entries, meds, profile, concerns };
+    const payload = { trackers, entries, meds, profile, concerns, customTrackerDefs };
     const { iv, ciphertext } = await encryptJSON(cryptoKeyRef.current, payload);
     const backup = { formatVersion: 1, saltB64: saltRef.current, iterations: PBKDF2_ITERATIONS, iv, ciphertext, exportedAt: new Date().toISOString() };
     const blob = new Blob([JSON.stringify(backup)], { type: "application/json" });
@@ -736,13 +759,14 @@ function CareLog() {
       setEntries(data.entries || []);
       setMeds(data.meds || []);
       setConcerns(data.concerns || []);
+      setCustomTrackerDefs(data.customTrackerDefs || []);
       setProfile(data.profile || { ageYears: "", ageMonths: "", ethnicity: "", unitSystem: "imperial" });
       skippedInitialPersist.current = true;
       setRestoreSuccess(true);
       if (isFirstRun) {
         setPhase("ready");
       } else {
-        await persist(data.trackers || [], data.entries || [], data.meds || [], data.profile || profile, data.concerns || []);
+        await persist(data.trackers || [], data.entries || [], data.meds || [], data.profile || profile, data.concerns || [], data.customTrackerDefs || []);
         setShowBackup(false);
       }
     } catch (e) {
@@ -826,6 +850,12 @@ function CareLog() {
     );
   }, [templateQuery]);
 
+  const filteredCustomDefs = useMemo(() => {
+    const q = templateQuery.trim().toLowerCase();
+    if (!q) return customTrackerDefs;
+    return customTrackerDefs.filter((d) => d.name.toLowerCase().includes(q));
+  }, [templateQuery, customTrackerDefs]);
+
   function trackerSeries(trackerId) {
     return entries
       .filter((e) => e.values[trackerId] != null && typeof e.values[trackerId] !== "boolean")
@@ -893,16 +923,10 @@ function CareLog() {
     setSelectedConcernIds((prev) => (prev.includes(id) ? prev.filter((c) => c !== id) : [...prev, id]));
   }
 
-  function addSelectedTrackers() {
-    const template = TEMPLATES.find((t) => t.id === openTemplateId);
-    if (!template) return;
-    const toAdd = template.trackers.filter((tr) => selectedTrackerNames.includes(tr.name));
-    if (toAdd.length === 0 || toAdd.length > remainingSlots) return;
-
-    // Resolve concerns: reuse any selected existing ones, plus a new one if the user
-    // typed a name that doesn't match an existing concern. A tracker can end up tagged
-    // with multiple concerns — that's the point, since a symptom like a cough can
-    // genuinely belong to more than one thing you're tracking at once.
+  // Shared by both the template-add flow and the custom-tracker flow — resolves the
+  // selected/typed concerns into a final id list, creating a new Concern only if the
+  // typed name doesn't match one that already exists.
+  function resolveConcernIds() {
     let finalConcernIds = [...selectedConcernIds];
     const trimmedNew = newConcernName.trim();
     if (trimmedNew) {
@@ -915,6 +939,18 @@ function CareLog() {
         finalConcernIds.push(newConcern.id);
       }
     }
+    return finalConcernIds;
+  }
+
+  function addSelectedTrackers() {
+    const template = TEMPLATES.find((t) => t.id === openTemplateId);
+    if (!template) return;
+    const toAdd = template.trackers.filter((tr) => selectedTrackerNames.includes(tr.name));
+    if (toAdd.length === 0 || toAdd.length > remainingSlots) return;
+
+    // A tracker can end up tagged with multiple concerns — that's the point, since a
+    // symptom like a cough can genuinely belong to more than one thing at once.
+    const finalConcernIds = resolveConcernIds();
 
     const newTrackers = toAdd.map((tr) => ({
       id: uid(),
@@ -929,6 +965,68 @@ function CareLog() {
     setTrackers((prev) => [...prev, ...newTrackers]);
     setOpenTemplateId(null);
     setSelectedTrackerNames([]);
+    setSelectedConcernIds([]);
+    setNewConcernName("");
+    setTemplateQuery("");
+    setView("dashboard");
+  }
+
+  // ---------- Custom tracker flow ----------
+  function startCustomTrackerFlow(prefillName) {
+    setCustomTrackerNameInput(prefillName || "");
+    setCustomTrackerType("scale");
+    setShowCustomTrackerForm(true);
+  }
+
+  function cancelCustomTrackerForm() {
+    setShowCustomTrackerForm(false);
+    setCustomTrackerNameInput("");
+  }
+
+  function confirmCustomTrackerDetails() {
+    const name = customTrackerNameInput.trim();
+    if (!name) return;
+    const existingMatch = concerns.find((c) => c.name.toLowerCase() === name.toLowerCase());
+    setSelectedConcernIds(existingMatch ? [existingMatch.id] : []);
+    setNewConcernName("");
+    setPendingCustomTracker({ name, type: customTrackerType, scaleMax: 5 });
+    setShowCustomTrackerForm(false);
+  }
+
+  function selectExistingCustomDef(def) {
+    setSelectedConcernIds([]);
+    setNewConcernName("");
+    setPendingCustomTracker({ name: def.name, type: def.type, scaleMax: def.scaleMax, sourceCustomDefinitionId: def.id });
+  }
+
+  function cancelPendingCustomTracker() {
+    setPendingCustomTracker(null);
+    setSelectedConcernIds([]);
+    setNewConcernName("");
+  }
+
+  function addPendingCustomTracker() {
+    if (!pendingCustomTracker || remainingSlots <= 0) return;
+    const finalConcernIds = resolveConcernIds();
+
+    let defId = pendingCustomTracker.sourceCustomDefinitionId;
+    if (!defId) {
+      const newDef = { id: uid(), name: pendingCustomTracker.name, type: pendingCustomTracker.type, scaleMax: pendingCustomTracker.scaleMax };
+      setCustomTrackerDefs((prev) => [...prev, newDef]);
+      defId = newDef.id;
+    }
+
+    const newTracker = {
+      id: uid(),
+      name: pendingCustomTracker.name,
+      type: pendingCustomTracker.type,
+      scaleMax: pendingCustomTracker.scaleMax,
+      sourceCustomDefinitionId: defId,
+      concernIds: finalConcernIds,
+      archived: false,
+    };
+    setTrackers((prev) => [...prev, newTracker]);
+    setPendingCustomTracker(null);
     setSelectedConcernIds([]);
     setNewConcernName("");
     setTemplateQuery("");
@@ -1105,13 +1203,30 @@ function CareLog() {
     <div style={{ background: paper, minHeight: "100vh", color: ink }}>
       <GlobalStyle />
       <div style={{ maxWidth: 560, margin: "0 auto", padding: "20px 16px 80px" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 18 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 18, flexWrap: "wrap", gap: 8 }}>
           <h1 style={{ fontSize: 26, fontWeight: 700, margin: 0, fontFamily: "Georgia, serif" }}>Care Log</h1>
-          <div style={{ display: "flex", gap: 4 }}>
+          <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+            <button
+              onClick={() => setShowEmergencyResources((s) => !s)}
+              style={{ ...linkBtnSmall, color: red, borderColor: red, fontWeight: 700 }}
+            >
+              Emergency Resources
+            </button>
             <button style={linkBtnSmall} onClick={() => setShowSettings((s) => !s)}>Units</button>
             <button style={linkBtnSmall} onClick={() => setShowBackup((s) => !s)}>Backup</button>
           </div>
         </div>
+
+        {showEmergencyResources && (
+          <div style={{ background: redSoft, border: `1px solid ${red}`, borderRadius: 14, padding: 14, marginBottom: 18 }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: red, marginBottom: 6 }}>Emergency Resources</div>
+            <p style={{ fontSize: 13, color: ink, margin: 0 }}>
+              This section is a placeholder — real resource information (crisis lines, poison control,
+              and other emergency contacts) hasn't been added yet. Care Log is symptom-tracking software,
+              not an emergency or crisis service; in an actual emergency, contact local emergency services directly.
+            </p>
+          </div>
+        )}
 
         {showSettings && (
           <div style={{ background: card, border: `1px solid ${border}`, borderRadius: 14, padding: 14, marginBottom: 16 }}>
@@ -1170,12 +1285,25 @@ function CareLog() {
             selectedTrackerNames={selectedTrackerNames}
             toggleTrackerSelection={toggleTrackerSelection}
             addSelectedTrackers={addSelectedTrackers}
-            onClose={() => { setView("dashboard"); setOpenTemplateId(null); setTemplateQuery(""); }}
+            onClose={() => { setView("dashboard"); setOpenTemplateId(null); setTemplateQuery(""); cancelCustomTrackerForm(); cancelPendingCustomTracker(); }}
             concerns={concerns}
             selectedConcernIds={selectedConcernIds}
             toggleConcernSelection={toggleConcernSelection}
             newConcernName={newConcernName}
             setNewConcernName={setNewConcernName}
+            customDefs={filteredCustomDefs}
+            selectExistingCustomDef={selectExistingCustomDef}
+            showCustomTrackerForm={showCustomTrackerForm}
+            startCustomTrackerFlow={startCustomTrackerFlow}
+            cancelCustomTrackerForm={cancelCustomTrackerForm}
+            customTrackerNameInput={customTrackerNameInput}
+            setCustomTrackerNameInput={setCustomTrackerNameInput}
+            customTrackerType={customTrackerType}
+            setCustomTrackerType={setCustomTrackerType}
+            confirmCustomTrackerDetails={confirmCustomTrackerDetails}
+            pendingCustomTracker={pendingCustomTracker}
+            cancelPendingCustomTracker={cancelPendingCustomTracker}
+            addPendingCustomTracker={addPendingCustomTracker}
           />
         ) : activeTrackers.length === 0 ? (
           // First-run / zero-active-trackers state: nothing but the one action.
@@ -1412,6 +1540,22 @@ function TrackerCard({ tracker, series, latest, history, unitSystem, meds, domai
               </button>
             </div>
           )}
+          {tracker.type === "number" && (
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <input
+                type="number"
+                inputMode="decimal"
+                step="any"
+                placeholder="0"
+                value={draftValue ?? ""}
+                onChange={(e) => onDraftChange(e.target.value === "" ? "" : parseFloat(e.target.value))}
+                style={{ ...inputStyle, width: 90 }}
+              />
+              <button style={primaryBtnSmall} onClick={() => draftValue !== undefined && draftValue !== "" && logAt(draftValue)}>
+                Log
+              </button>
+            </div>
+          )}
           {tracker.type === "scale" && (
             <div style={{ display: "flex", gap: 6 }}>
               {Array.from({ length: (tracker.scaleMax || 5) + 1 }, (_, n) => n).map((n) => (
@@ -1478,6 +1622,14 @@ function TrackerCard({ tracker, series, latest, history, unitSystem, meds, domai
                       {tracker.type === "temperature" && (
                         <input
                           type="number" inputMode="decimal" step="0.1"
+                          value={editValue ?? ""}
+                          onChange={(e) => setEditValue(e.target.value)}
+                          style={{ ...inputStyle, padding: "6px 8px", fontSize: 13, width: 90 }}
+                        />
+                      )}
+                      {tracker.type === "number" && (
+                        <input
+                          type="number" inputMode="decimal" step="any"
                           value={editValue ?? ""}
                           onChange={(e) => setEditValue(e.target.value)}
                           style={{ ...inputStyle, padding: "6px 8px", fontSize: 13, width: 90 }}
@@ -1561,9 +1713,132 @@ function TrackerCard({ tracker, series, latest, history, unitSystem, meds, domai
   );
 }
 
-function TemplatePicker({ query, setQuery, templates, remainingSlots, openTemplateId, openTemplate, selectedTrackerNames, toggleTrackerSelection, addSelectedTrackers, onClose, concerns, selectedConcernIds, toggleConcernSelection, newConcernName, setNewConcernName }) {
+function ConcernPicker({ concerns, selectedConcernIds, toggleConcernSelection, newConcernName, setNewConcernName }) {
+  return (
+    <div style={{ marginTop: 14, paddingTop: 12, borderTop: `1px solid ${paperDark}` }}>
+      <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 6 }}>Health concern (optional)</div>
+      <p style={{ fontSize: 12, color: inkSoft, margin: "0 0 8px" }}>
+        Group this under a concern so you can view it together with related trackers — a symptom can belong to more than one.
+      </p>
+      {concerns.length > 0 && (
+        <div style={{ marginBottom: 8 }}>
+          {concerns.map((c) => (
+            <label key={c.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 2px", cursor: "pointer" }}>
+              <input
+                type="checkbox"
+                checked={selectedConcernIds.includes(c.id)}
+                onChange={() => toggleConcernSelection(c.id)}
+                style={{ width: 18, height: 18, accentColor: teal }}
+              />
+              <span style={{ fontSize: 14 }}>{c.name}</span>
+            </label>
+          ))}
+        </div>
+      )}
+      <input
+        placeholder="New concern, e.g. Cold / Flu"
+        value={newConcernName}
+        onChange={(e) => setNewConcernName(e.target.value)}
+        style={{ ...inputStyle, fontSize: 13, padding: "8px 10px" }}
+      />
+    </div>
+  );
+}
+
+function TemplatePicker({
+  query, setQuery, templates, remainingSlots, openTemplateId, openTemplate, selectedTrackerNames, toggleTrackerSelection, addSelectedTrackers, onClose,
+  concerns, selectedConcernIds, toggleConcernSelection, newConcernName, setNewConcernName,
+  customDefs, selectExistingCustomDef,
+  showCustomTrackerForm, startCustomTrackerFlow, cancelCustomTrackerForm,
+  customTrackerNameInput, setCustomTrackerNameInput, customTrackerType, setCustomTrackerType, confirmCustomTrackerDetails,
+  pendingCustomTracker, cancelPendingCustomTracker, addPendingCustomTracker,
+}) {
   const activeTemplate = templates.find((t) => t.id === openTemplateId) || TEMPLATES.find((t) => t.id === openTemplateId);
 
+  // ---------- Custom tracker: name + type form ----------
+  if (showCustomTrackerForm) {
+    const TYPE_OPTIONS = [
+      { key: "scale", label: "Rate severity (0–5)" },
+      { key: "boolean", label: "Yes / No" },
+      { key: "number", label: "Number" },
+    ];
+    return (
+      <div style={{ background: card, border: `1px solid ${border}`, borderRadius: 16, padding: 16 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+          <button aria-label="Back" style={iconBtn} onClick={cancelCustomTrackerForm}>
+            <ChevronLeft size={20} />
+          </button>
+          <div style={{ fontSize: 18, fontWeight: 700 }}>Custom symptom</div>
+        </div>
+        <div style={{ marginTop: 12 }}>
+          <label style={{ fontSize: 13, fontWeight: 700, display: "block", marginBottom: 6 }}>Name</label>
+          <input
+            placeholder="e.g. Joint pain"
+            value={customTrackerNameInput}
+            onChange={(e) => setCustomTrackerNameInput(e.target.value)}
+            style={{ ...inputStyle, marginBottom: 14 }}
+            autoFocus
+          />
+          <label style={{ fontSize: 13, fontWeight: 700, display: "block", marginBottom: 6 }}>How should this be logged?</label>
+          {TYPE_OPTIONS.map((opt) => (
+            <label key={opt.key} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 4px", borderBottom: `1px solid ${paperDark}`, cursor: "pointer" }}>
+              <input
+                type="radio"
+                name="customTrackerType"
+                checked={customTrackerType === opt.key}
+                onChange={() => setCustomTrackerType(opt.key)}
+                style={{ width: 18, height: 18, accentColor: teal }}
+              />
+              <span style={{ fontSize: 15 }}>{opt.label}</span>
+            </label>
+          ))}
+        </div>
+        <button
+          style={{ ...primaryBtn, marginTop: 16, opacity: customTrackerNameInput.trim() ? 1 : 0.5 }}
+          disabled={!customTrackerNameInput.trim()}
+          onClick={confirmCustomTrackerDetails}
+        >
+          Continue
+        </button>
+      </div>
+    );
+  }
+
+  // ---------- Custom tracker (new or reused): concern step + add ----------
+  if (pendingCustomTracker) {
+    const overLimit = remainingSlots <= 0;
+    return (
+      <div style={{ background: card, border: `1px solid ${border}`, borderRadius: 16, padding: 16 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+          <button aria-label="Back" style={iconBtn} onClick={cancelPendingCustomTracker}>
+            <ChevronLeft size={20} />
+          </button>
+          <div style={{ fontSize: 18, fontWeight: 700 }}>{pendingCustomTracker.name}</div>
+        </div>
+        <ConcernPicker
+          concerns={concerns}
+          selectedConcernIds={selectedConcernIds}
+          toggleConcernSelection={toggleConcernSelection}
+          newConcernName={newConcernName}
+          setNewConcernName={setNewConcernName}
+        />
+        {overLimit && (
+          <div style={{ ...errorStyle, marginTop: 10 }}>
+            You've reached the free plan's {MAX_TRACKERS}-tracker limit. Archive an existing tracker to add a new one.
+          </div>
+        )}
+        <button
+          style={{ ...primaryBtn, marginTop: 14, opacity: overLimit ? 0.5 : 1 }}
+          disabled={overLimit}
+          onClick={addPendingCustomTracker}
+        >
+          Add tracker
+        </button>
+      </div>
+    );
+  }
+
+  // ---------- Official template: tracker checklist + concern step ----------
   if (openTemplateId && activeTemplate) {
     const overLimit = selectedTrackerNames.length > remainingSlots;
     return (
@@ -1585,33 +1860,13 @@ function TemplatePicker({ query, setQuery, templates, remainingSlots, openTempla
           );
         })}
 
-        <div style={{ marginTop: 14, paddingTop: 12, borderTop: `1px solid ${paperDark}` }}>
-          <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 6 }}>Health concern (optional)</div>
-          <p style={{ fontSize: 12, color: inkSoft, margin: "0 0 8px" }}>
-            Group these under a concern so you can view them together — a symptom can belong to more than one.
-          </p>
-          {concerns.length > 0 && (
-            <div style={{ marginBottom: 8 }}>
-              {concerns.map((c) => (
-                <label key={c.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 2px", cursor: "pointer" }}>
-                  <input
-                    type="checkbox"
-                    checked={selectedConcernIds.includes(c.id)}
-                    onChange={() => toggleConcernSelection(c.id)}
-                    style={{ width: 18, height: 18, accentColor: teal }}
-                  />
-                  <span style={{ fontSize: 14 }}>{c.name}</span>
-                </label>
-              ))}
-            </div>
-          )}
-          <input
-            placeholder="New concern, e.g. Cold / Flu"
-            value={newConcernName}
-            onChange={(e) => setNewConcernName(e.target.value)}
-            style={{ ...inputStyle, fontSize: 13, padding: "8px 10px" }}
-          />
-        </div>
+        <ConcernPicker
+          concerns={concerns}
+          selectedConcernIds={selectedConcernIds}
+          toggleConcernSelection={toggleConcernSelection}
+          newConcernName={newConcernName}
+          setNewConcernName={setNewConcernName}
+        />
 
         {overLimit && (
           <div style={{ ...errorStyle, marginTop: 10 }}>
@@ -1634,6 +1889,8 @@ function TemplatePicker({ query, setQuery, templates, remainingSlots, openTempla
     );
   }
 
+  // ---------- Browse: search, "Your trackers", official templates, add-custom ----------
+  const noMatches = templates.length === 0 && customDefs.length === 0;
   return (
     <div>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
@@ -1652,13 +1909,46 @@ function TemplatePicker({ query, setQuery, templates, remainingSlots, openTempla
           autoFocus
         />
       </div>
+
+      {customDefs.length > 0 && (
+        <>
+          <div style={{ fontSize: 12, fontWeight: 700, color: inkSoft, textTransform: "uppercase", letterSpacing: 0.4, margin: "0 0 8px" }}>
+            Your trackers
+          </div>
+          {customDefs.map((d) => (
+            <button key={d.id} style={templateRow} onClick={() => selectExistingCustomDef(d)}>
+              <div style={{ fontSize: 15, fontWeight: 700 }}>{d.name}</div>
+              <div style={{ fontSize: 12, color: inkSoft, marginTop: 2 }}>
+                {d.type === "scale" ? `Severity 0–${d.scaleMax || 5}` : d.type === "boolean" ? "Yes / No" : "Number"}
+              </div>
+            </button>
+          ))}
+          <div style={{ fontSize: 12, fontWeight: 700, color: inkSoft, textTransform: "uppercase", letterSpacing: 0.4, margin: "14px 0 8px" }}>
+            Illness templates
+          </div>
+        </>
+      )}
+
       {templates.map((t) => (
         <button key={t.id} style={templateRow} onClick={() => openTemplate(t.id)}>
           <div style={{ fontSize: 15, fontWeight: 700 }}>{t.label}</div>
           <div style={{ fontSize: 12, color: inkSoft, marginTop: 2 }}>{t.description}</div>
         </button>
       ))}
-      {templates.length === 0 && <div style={{ fontSize: 13, color: inkSoft, padding: "10px 4px" }}>No matches — try a different word.</div>}
+
+      {noMatches && query.trim() ? (
+        <button style={templateRow} onClick={() => startCustomTrackerFlow(query.trim())}>
+          <div style={{ fontSize: 15, fontWeight: 700, color: blue }}>No matches for "{query.trim()}"</div>
+          <div style={{ fontSize: 12, color: inkSoft, marginTop: 2 }}>Track it as a custom symptom instead</div>
+        </button>
+      ) : (
+        <button
+          onClick={() => startCustomTrackerFlow("")}
+          style={{ ...linkBtn, marginTop: 10, background: "none", textAlign: "center" }}
+        >
+          Don't see it? Add a custom symptom
+        </button>
+      )}
     </div>
   );
 }
