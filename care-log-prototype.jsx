@@ -152,7 +152,10 @@ function fmtTimeShort(iso) {
   return new Date(iso).toLocaleString(undefined, { hour: "numeric", minute: "2-digit" });
 }
 function nowForInput() {
-  const d = new Date();
+  return isoToLocalInput(new Date().toISOString());
+}
+function isoToLocalInput(iso) {
+  const d = new Date(iso);
   const off = d.getTimezoneOffset();
   const local = new Date(d.getTime() - off * 60000);
   return local.toISOString().slice(0, 16);
@@ -223,16 +226,18 @@ function Sparkline({ points, kind, unitSystem, scaleMax, meds, domain }) {
     id: g.items[0].id,
   }));
   const baseY = height - pad;
-  const MIN_MARKER_GAP_PX = 26;
+  // Gap and stagger sized for the larger, more-legible label font below.
+  const MIN_MARKER_GAP_PX = 34;
   let lastX = -Infinity;
   let stagger = 0;
   const staggeredMeds = chartMedGroups.map((g) => {
     const x = scaleX(g.t);
     stagger = x - lastX < MIN_MARKER_GAP_PX ? stagger + 1 : 0;
     lastX = x;
-    return { ...g, x, extraLift: stagger * 10 };
+    return { ...g, x, extraLift: stagger * 14 };
   });
-  const chartHeight = staggeredMeds.length ? height + 30 + Math.max(...staggeredMeds.map((m) => m.extraLift), 0) : height;
+  const chartHeight = staggeredMeds.length ? height + 36 + Math.max(...staggeredMeds.map((m) => m.extraLift), 0) : height;
+  const medDark = "#33506E"; // darker than the standard blue accent, for better contrast at small sizes
 
   return (
     <svg width={width} height={chartHeight} role="img"
@@ -253,10 +258,19 @@ function Sparkline({ points, kind, unitSystem, scaleMax, meds, domain }) {
       {staggeredMeds.map((m) => (
         <g key={m.id}>
           <line x1={m.x} y1={baseY} x2={m.x} y2={pad - m.extraLift} stroke={blue} strokeOpacity={0.35} strokeDasharray="2 2" />
-          <circle cx={m.x} cy={baseY} r={3} fill={blue} stroke={card} strokeWidth={1} />
+          <circle cx={m.x} cy={baseY} r={3} fill={medDark} stroke={card} strokeWidth={1} />
+          {/* Rendered twice: a thick pale "halo" copy first so the label stays readable
+              over the chart line or other labels behind it, then the real text on top. */}
           <text
-            x={m.x} y={baseY - m.extraLift} transform={`rotate(-55 ${m.x} ${baseY - m.extraLift})`} dx={5} dy={-4}
-            fontSize={9} fontWeight={600} fill={blue}
+            x={m.x} y={baseY - m.extraLift} transform={`rotate(-45 ${m.x} ${baseY - m.extraLift})`} dx={6} dy={-4}
+            fontSize={11} fontWeight={700} fill="none" stroke={card} strokeWidth={3} strokeLinejoin="round"
+            fontFamily="-apple-system, sans-serif"
+          >
+            {m.label}
+          </text>
+          <text
+            x={m.x} y={baseY - m.extraLift} transform={`rotate(-45 ${m.x} ${baseY - m.extraLift})`} dx={6} dy={-4}
+            fontSize={11} fontWeight={700} fill={medDark}
             fontFamily="-apple-system, sans-serif"
           >
             {m.label}
@@ -518,6 +532,38 @@ export default function CareLog() {
     return [...entries]
       .filter((e) => e.values[trackerId] != null)
       .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))[0];
+  }
+
+  // Full history for a tracker (any value type, including booleans) — used by the
+  // per-tracker History list, most recent first.
+  function entriesForTracker(trackerId) {
+    return entries
+      .filter((e) => e.values[trackerId] != null)
+      .map((e) => ({ id: e.id, timestamp: e.timestamp, value: e.values[trackerId] }))
+      .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+  }
+
+  function updateEntryValue(entryId, trackerId, newValue, newTimeInput) {
+    setEntries((prev) =>
+      prev.map((e) => {
+        if (e.id !== entryId) return e;
+        const timestamp = newTimeInput ? new Date(newTimeInput).toISOString() : e.timestamp;
+        return { ...e, timestamp, values: { ...e.values, [trackerId]: newValue } };
+      })
+    );
+  }
+
+  function deleteEntryValue(entryId, trackerId) {
+    setEntries((prev) =>
+      prev
+        .map((e) => {
+          if (e.id !== entryId) return e;
+          const rest = { ...e.values };
+          delete rest[trackerId];
+          return { ...e, values: rest };
+        })
+        .filter((e) => Object.keys(e.values).length > 0)
+    );
   }
 
   // ---------- Actions ----------
@@ -796,6 +842,7 @@ export default function CareLog() {
                 tracker={t}
                 series={trackerSeries(t.id)}
                 latest={latestEntryFor(t.id)}
+                history={entriesForTracker(t.id)}
                 unitSystem={profile.unitSystem}
                 meds={meds}
                 domain={chartDomain}
@@ -803,6 +850,8 @@ export default function CareLog() {
                 onDraftChange={(v) => setDraftValues((d) => ({ ...d, [t.id]: v }))}
                 onLog={(v, atTime) => logValue(t.id, v, t.type === "temperature", atTime)}
                 onArchive={() => archiveTracker(t.id)}
+                onUpdateEntry={(entryId, newValue, newTime) => updateEntryValue(entryId, t.id, newValue, newTime)}
+                onDeleteEntry={(entryId) => deleteEntryValue(entryId, t.id)}
               />
             ))}
 
@@ -867,10 +916,40 @@ function Field({ label, children }) {
   );
 }
 
-function TrackerCard({ tracker, series, latest, unitSystem, meds, domain, draftValue, onDraftChange, onLog, onArchive }) {
+function TrackerCard({ tracker, series, latest, history, unitSystem, meds, domain, draftValue, onDraftChange, onLog, onArchive, onUpdateEntry, onDeleteEntry }) {
   const unitLabel = tracker.type === "temperature" ? tempUnitLabel(unitSystem) : null;
   const [customTime, setCustomTime] = useState(null); // null = log at "now" (the fast default)
+  const [showHistory, setShowHistory] = useState(false);
+  const [showAllHistory, setShowAllHistory] = useState(false);
+  const [editingEntryId, setEditingEntryId] = useState(null);
+  const [editValue, setEditValue] = useState(undefined);
+  const [editTime, setEditTime] = useState("");
   const logAt = (value) => onLog(value, customTime);
+
+  function startEdit(entry) {
+    setEditingEntryId(entry.id);
+    setEditValue(entry.value);
+    setEditTime(isoToLocalInput(entry.timestamp));
+  }
+  function cancelEdit() {
+    setEditingEntryId(null);
+    setEditValue(undefined);
+    setEditTime("");
+  }
+  function saveEdit() {
+    if (editValue === undefined || editValue === "") return;
+    const value = tracker.type === "boolean" ? editValue : Number(editValue);
+    onUpdateEntry(editingEntryId, value, editTime);
+    cancelEdit();
+  }
+  function formatValue(v) {
+    if (typeof v === "boolean") return v ? "Present" : "Absent";
+    if (tracker.type === "temperature") return `${displayTemp(v, unitSystem).toFixed(1)}${unitLabel}`;
+    return `${v}`;
+  }
+
+  const historyShown = showAllHistory ? history : history.slice(0, 6);
+
   return (
     <div style={{ background: card, border: `1px solid ${border}`, borderRadius: 16, padding: 14, marginBottom: 12 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
@@ -947,6 +1026,104 @@ function TrackerCard({ tracker, series, latest, unitSystem, meds, domain, draftV
           )}
         </div>
       </div>
+
+      {history.length > 0 && (
+        <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px solid ${paperDark}` }}>
+          <button
+            onClick={() => setShowHistory((s) => !s)}
+            style={{ background: "none", border: "none", color: blue, fontSize: 12, fontWeight: 600, padding: 0, cursor: "pointer" }}
+          >
+            {showHistory ? "Hide history" : `History (${history.length})`}
+          </button>
+
+          {showHistory && (
+            <div style={{ marginTop: 8 }}>
+              {historyShown.map((entry) => (
+                <div key={entry.id} style={{ padding: "6px 0", borderBottom: `1px solid ${paperDark}` }}>
+                  {editingEntryId === entry.id ? (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                      {tracker.type === "temperature" && (
+                        <input
+                          type="number" inputMode="decimal" step="0.1"
+                          value={editValue ?? ""}
+                          onChange={(e) => setEditValue(e.target.value)}
+                          style={{ ...inputStyle, padding: "6px 8px", fontSize: 13, width: 90 }}
+                        />
+                      )}
+                      {tracker.type === "scale" && (
+                        <div style={{ display: "flex", gap: 4 }}>
+                          {Array.from({ length: (tracker.scaleMax || 5) + 1 }, (_, n) => n).map((n) => (
+                            <button
+                              key={n}
+                              onClick={() => setEditValue(n)}
+                              style={{
+                                ...scaleBtn, width: 30, height: 30, fontSize: 12,
+                                background: editValue === n ? teal : paper,
+                                color: editValue === n ? "white" : ink,
+                                borderColor: editValue === n ? teal : border,
+                              }}
+                            >
+                              {n}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                      {tracker.type === "boolean" && (
+                        <div style={{ display: "flex", gap: 6 }}>
+                          <button
+                            onClick={() => setEditValue(true)}
+                            style={{ ...scaleBtn, width: "auto", padding: "6px 10px", fontSize: 12, background: editValue === true ? teal : paper, color: editValue === true ? "white" : ink, borderColor: editValue === true ? teal : border }}
+                          >
+                            Present
+                          </button>
+                          <button
+                            onClick={() => setEditValue(false)}
+                            style={{ ...scaleBtn, width: "auto", padding: "6px 10px", fontSize: 12, background: editValue === false ? teal : paper, color: editValue === false ? "white" : ink, borderColor: editValue === false ? teal : border }}
+                          >
+                            Absent
+                          </button>
+                        </div>
+                      )}
+                      <input
+                        type="datetime-local"
+                        value={editTime}
+                        onChange={(e) => setEditTime(e.target.value)}
+                        style={{ ...inputStyle, padding: "6px 8px", fontSize: 12 }}
+                      />
+                      <div style={{ display: "flex", gap: 8 }}>
+                        <button onClick={saveEdit} style={{ ...primaryBtnSmall, padding: "6px 12px", fontSize: 12 }}>Save</button>
+                        <button onClick={cancelEdit} style={{ background: "none", border: "none", color: inkSoft, fontSize: 12, cursor: "pointer" }}>Cancel</button>
+                        <button
+                          onClick={() => { onDeleteEntry(entry.id); cancelEdit(); }}
+                          style={{ background: "none", border: "none", color: red, fontSize: 12, cursor: "pointer", marginLeft: "auto" }}
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <button
+                      onClick={() => startEdit(entry)}
+                      style={{ display: "flex", justifyContent: "space-between", width: "100%", background: "none", border: "none", padding: 0, cursor: "pointer", fontSize: 13 }}
+                    >
+                      <span>{formatValue(entry.value)}</span>
+                      <span style={{ color: inkSoft }}>{fmtTime(entry.timestamp)}</span>
+                    </button>
+                  )}
+                </div>
+              ))}
+              {!showAllHistory && history.length > 6 && (
+                <button
+                  onClick={() => setShowAllHistory(true)}
+                  style={{ background: "none", border: "none", color: blue, fontSize: 12, fontWeight: 600, padding: "6px 0 0", cursor: "pointer" }}
+                >
+                  Show {history.length - 6} more
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
