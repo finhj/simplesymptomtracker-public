@@ -619,6 +619,7 @@ function Sparkline({ points, kind, unitSystem, scaleMax, meds, treatments, flagg
 export default function CareLog() {
   const [phase, setPhase] = useState("loading"); // loading | setup | locked | ready
   const [errorMsg, setErrorMsg] = useState("");
+  const [showForgotPasscode, setShowForgotPasscode] = useState(false);
   const [passcodeInput, setPasscodeInput] = useState("");
   const [passcodeConfirm, setPasscodeConfirm] = useState("");
 
@@ -654,6 +655,10 @@ export default function CareLog() {
   const [treatmentDetail, setTreatmentDetail] = useState("");
   const [treatmentMedNames, setTreatmentMedNames] = useState([]); // medications given as part of the treatment being logged
   const [treatmentNewMedName, setTreatmentNewMedName] = useState("");
+  const [notes, setNotes] = useState([]); // [{id, text, timestamp, concernIds, deletedAt}] — time-grounded free-text context that doesn't fit a structured tracker
+  const [noteText, setNoteText] = useState("");
+  const [noteConcernIds, setNoteConcernIds] = useState([]);
+  const [noteNewConcernName, setNoteNewConcernName] = useState("");
   const [markPeriodConcernId, setMarkPeriodConcernId] = useState(null); // which concern's "mark a period" form is open
   const [periodLabelInput, setPeriodLabelInput] = useState("Relapse");
   const [periodStartInput, setPeriodStartInput] = useState("");
@@ -696,9 +701,9 @@ export default function CareLog() {
   }, []);
 
   // ---------- Persist (encrypt + save) ----------
-  const persist = useCallback(async (nextTrackers, nextEntries, nextMeds, nextProfile, nextConcerns, nextCustomDefs, nextFlaggedPeriods, nextTreatments) => {
+  const persist = useCallback(async (nextTrackers, nextEntries, nextMeds, nextProfile, nextConcerns, nextCustomDefs, nextFlaggedPeriods, nextTreatments, nextNotes) => {
     if (!cryptoKeyRef.current) return;
-    const payload = { trackers: nextTrackers, entries: nextEntries, meds: nextMeds, profile: nextProfile, concerns: nextConcerns, customTrackerDefs: nextCustomDefs, flaggedPeriods: nextFlaggedPeriods, treatments: nextTreatments };
+    const payload = { trackers: nextTrackers, entries: nextEntries, meds: nextMeds, profile: nextProfile, concerns: nextConcerns, customTrackerDefs: nextCustomDefs, flaggedPeriods: nextFlaggedPeriods, treatments: nextTreatments, notes: nextNotes };
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
         const { iv, ciphertext } = await encryptJSON(cryptoKeyRef.current, payload);
@@ -722,9 +727,9 @@ export default function CareLog() {
       skippedInitialPersist.current = true;
       return;
     }
-    persist(trackers, entries, meds, profile, concerns, customTrackerDefs, flaggedPeriods, treatments);
+    persist(trackers, entries, meds, profile, concerns, customTrackerDefs, flaggedPeriods, treatments, notes);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [trackers, entries, meds, profile, concerns, customTrackerDefs, flaggedPeriods, treatments]);
+  }, [trackers, entries, meds, profile, concerns, customTrackerDefs, flaggedPeriods, treatments, notes]);
 
   // ---------- Setup (first run — create passcode) ----------
   async function handleCreatePasscode() {
@@ -766,7 +771,7 @@ export default function CareLog() {
       return;
     }
     try {
-      const { iv, ciphertext } = await encryptJSON(cryptoKeyRef.current, { trackers: [], entries: [], meds: [], profile: nextProfile, concerns: [], customTrackerDefs: [], flaggedPeriods: [], treatments: [] });
+      const { iv, ciphertext } = await encryptJSON(cryptoKeyRef.current, { trackers: [], entries: [], meds: [], profile: nextProfile, concerns: [], customTrackerDefs: [], flaggedPeriods: [], treatments: [], notes: [] });
       const vault = { saltB64: saltRef.current, iterations: PBKDF2_ITERATIONS, iv, ciphertext };
       const result = await window.storage.set(STORAGE_KEY, JSON.stringify(vault), false);
       if (!result) throw new Error("storage.set returned no result");
@@ -796,6 +801,7 @@ export default function CareLog() {
       setCustomTrackerDefs(data.customTrackerDefs || []);
       setFlaggedPeriods(data.flaggedPeriods || []);
       setTreatments(data.treatments || []);
+      setNotes(data.notes || []);
       setProfile(data.profile || { ageYears: "", ageMonths: "", ethnicity: "", unitSystem: "imperial" });
       skippedInitialPersist.current = true;
       setPasscodeInput("");
@@ -803,6 +809,34 @@ export default function CareLog() {
     } catch (e) {
       setErrorMsg("Incorrect passcode. Try again.");
     }
+  }
+
+  // A forgotten passcode makes the existing vault permanently unreadable — that's
+  // the zero-knowledge design working as intended, not a bug, and nothing here
+  // changes that. This just clears the now-inaccessible encrypted data so the app
+  // isn't a dead end, and returns to first-run setup for a genuinely new passcode.
+  async function startFresh() {
+    try {
+      await window.storage.delete(STORAGE_KEY, false);
+    } catch (e) {
+      console.error("care-log: failed to clear vault on start-fresh", e);
+    }
+    cryptoKeyRef.current = null;
+    saltRef.current = null;
+    setTrackers([]);
+    setEntries([]);
+    setMeds([]);
+    setConcerns([]);
+    setCustomTrackerDefs([]);
+    setFlaggedPeriods([]);
+    setTreatments([]);
+    setNotes([]);
+    setProfile({ ageYears: "", ageMonths: "", ethnicity: "", unitSystem: "imperial" });
+    setPasscodeInput("");
+    setErrorMsg("");
+    setShowForgotPasscode(false);
+    skippedInitialPersist.current = false;
+    setPhase("setup");
   }
 
   // ---------- Backup export / restore ----------
@@ -822,7 +856,7 @@ export default function CareLog() {
   }
 
   async function handleExportBackup() {
-    await downloadEncryptedBackup({ trackers, entries, meds, profile, concerns, customTrackerDefs, flaggedPeriods, treatments }, "manual");
+    await downloadEncryptedBackup({ trackers, entries, meds, profile, concerns, customTrackerDefs, flaggedPeriods, treatments, notes }, "manual");
   }
 
   async function handleRestoreFromFile(file, passcode, isFirstRun) {
@@ -845,7 +879,7 @@ export default function CareLog() {
       // not just a same-session convenience that's gone the moment the tab closes.
       if (!isFirstRun) {
         await downloadEncryptedBackup(
-          { trackers, entries, meds, profile, concerns, customTrackerDefs, flaggedPeriods, treatments },
+          { trackers, entries, meds, profile, concerns, customTrackerDefs, flaggedPeriods, treatments, notes },
           "before-restore"
         );
       }
@@ -859,13 +893,14 @@ export default function CareLog() {
       setCustomTrackerDefs(data.customTrackerDefs || []);
       setFlaggedPeriods(data.flaggedPeriods || []);
       setTreatments(data.treatments || []);
+      setNotes(data.notes || []);
       setProfile(data.profile || { ageYears: "", ageMonths: "", ethnicity: "", unitSystem: "imperial" });
       skippedInitialPersist.current = true;
       setRestoreSuccess(true);
       if (isFirstRun) {
         setPhase("ready");
       } else {
-        await persist(data.trackers || [], data.entries || [], data.meds || [], data.profile || profile, data.concerns || [], data.customTrackerDefs || [], data.flaggedPeriods || [], data.treatments || []);
+        await persist(data.trackers || [], data.entries || [], data.meds || [], data.profile || profile, data.concerns || [], data.customTrackerDefs || [], data.flaggedPeriods || [], data.treatments || [], data.notes || []);
         setShowBackup(false);
       }
     } catch (e) {
@@ -899,6 +934,11 @@ export default function CareLog() {
   const deletedTreatments = useMemo(
     () => treatments.filter((t) => t.deletedAt).sort((a, b) => new Date(b.deletedAt) - new Date(a.deletedAt)),
     [treatments]
+  );
+  const activeNotes = useMemo(() => notes.filter((n) => !n.deletedAt), [notes]);
+  const deletedNotes = useMemo(
+    () => notes.filter((n) => n.deletedAt).sort((a, b) => new Date(b.deletedAt) - new Date(a.deletedAt)),
+    [notes]
   );
 
   // Absolute bounds — the full span of everything logged. Zoom/pan and range
@@ -1061,6 +1101,10 @@ export default function CareLog() {
 
   function toggleTreatmentMedName(name) {
     setTreatmentMedNames((prev) => (prev.includes(name) ? prev.filter((n) => n !== name) : [...prev, name]));
+  }
+
+  function toggleNoteConcern(id) {
+    setNoteConcernIds((prev) => (prev.includes(id) ? prev.filter((c) => c !== id) : [...prev, id]));
   }
 
   // Shared by the template-add, custom-tracker, medication, and treatment flows —
@@ -1298,6 +1342,36 @@ export default function CareLog() {
     );
   }
 
+  // ---------- Notes (time-grounded free-text context) ----------
+  function addNote(atTime, concernSelection, newConcernNameInput) {
+    const text = noteText.trim();
+    if (!text) return;
+    const timestamp = atTime ? new Date(atTime).toISOString() : new Date().toISOString();
+    const concernIds = resolveConcernIds(concernSelection || [], newConcernNameInput || "");
+    setNotes((prev) => [...prev, { id: uid(), text, timestamp, concernIds }]);
+    setNoteText("");
+    setNoteConcernIds([]);
+    setNoteNewConcernName("");
+  }
+
+  function deleteNote(id) {
+    setNotes((prev) => prev.map((n) => (n.id === id ? { ...n, deletedAt: new Date().toISOString() } : n)));
+  }
+
+  function restoreNote(id) {
+    setNotes((prev) => prev.map((n) => (n.id === id ? { ...n, deletedAt: undefined } : n)));
+  }
+
+  function updateNote(id, newText, newTimeInput, newConcernIds) {
+    setNotes((prev) =>
+      prev.map((n) =>
+        n.id === id
+          ? { ...n, text: newText, timestamp: newTimeInput ? new Date(newTimeInput).toISOString() : n.timestamp, concernIds: newConcernIds }
+          : n
+      )
+    );
+  }
+
   const reportText = useMemo(() => {
     const since = new Date(Date.now() - 72 * 3600 * 1000);
     const lines = [`Care Log summary — last 72 hours`, `Generated ${new Date().toLocaleString()}`, ""];
@@ -1335,8 +1409,15 @@ export default function CareLog() {
     else groupMedsByDisplayTime(recentTreatments).forEach((g) =>
       lines.push(`  ${g.label} — ${g.items.map((t) => `${medLabel(t)}${t.medicationNames && t.medicationNames.length > 0 ? ` (with ${t.medicationNames.join(", ")})` : ""}`).join(", ")}`)
     );
+    lines.push("");
+    const recentNotes = activeNotes
+      .filter((n) => new Date(n.timestamp) >= since)
+      .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+    lines.push("Notes:");
+    if (recentNotes.length === 0) lines.push("  none logged");
+    else recentNotes.forEach((n) => lines.push(`  ${fmtTime(n.timestamp)} — ${n.text}`));
     return lines.join("\n");
-  }, [activeTrackers, activeEntries, activeMeds, activeTreatments, profile.unitSystem]);
+  }, [activeTrackers, activeEntries, activeMeds, activeTreatments, activeNotes, profile.unitSystem]);
 
   async function copyReport() {
     try {
@@ -1356,10 +1437,14 @@ export default function CareLog() {
   if (phase === "setup") {
     return (
       <Screen title="Set up your passcode">
-        <p style={{ fontSize: 14, color: inkSoft, margin: "0 0 18px" }}>
-          This locks the app and encrypts everything you log. There's no account and no password reset —
-          if you forget this passcode, your data can't be recovered, by us or anyone else.
+        <p style={{ fontSize: 14, color: inkSoft, margin: "0 0 10px" }}>
+          This locks the app and encrypts everything you log.
         </p>
+        <div style={{ background: redSoft, border: `1px solid ${red}`, borderRadius: 12, padding: 12, margin: "0 0 18px" }}>
+          <p style={{ fontSize: 14, color: ink, margin: 0, fontWeight: 600 }}>
+            There's no account and no password reset. If you forget this passcode, your data can't be recovered — by us or anyone else. Write it down somewhere safe.
+          </p>
+        </div>
         {!setupRestoreMode ? (
           <>
             <Field label="Passcode">
@@ -1437,6 +1522,35 @@ export default function CareLog() {
         </Field>
         {errorMsg && <div style={errorStyle}>{errorMsg}</div>}
         <button style={primaryBtn} onClick={handleUnlock}>Unlock</button>
+
+        {!showForgotPasscode ? (
+          <button
+            onClick={() => setShowForgotPasscode(true)}
+            style={{ background: "none", border: "none", color: inkSoft, fontSize: 13, cursor: "pointer", display: "block", margin: "16px auto 0", textDecoration: "underline" }}
+          >
+            Forgot your passcode?
+          </button>
+        ) : (
+          <div style={{ background: redSoft, border: `1px solid ${red}`, borderRadius: 12, padding: 12, marginTop: 16 }}>
+            <p style={{ fontSize: 13, color: ink, margin: "0 0 8px", fontWeight: 600 }}>
+              There's no way to recover a forgotten passcode — that's the zero-knowledge design working as intended, not something we can override.
+            </p>
+            <p style={{ fontSize: 13, color: ink, margin: "0 0 10px" }}>
+              Starting fresh only erases Care Log's own data on this device — not your phone, not any other app, nothing else. It's already unreadable without the right passcode, so nothing accessible is being lost, but this makes that permanent and can't be undone.
+            </p>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button style={{ ...primaryBtnSmall, background: red }} onClick={startFresh}>
+                Erase and start fresh
+              </button>
+              <button
+                onClick={() => setShowForgotPasscode(false)}
+                style={{ background: "none", border: "none", color: inkSoft, fontSize: 13, cursor: "pointer" }}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
       </Screen>
     );
   }
@@ -1457,9 +1571,9 @@ export default function CareLog() {
             </button>
             <button style={linkBtnSmall} onClick={() => setShowSettings((s) => !s)}>Units</button>
             <button style={linkBtnSmall} onClick={() => setShowBackup((s) => !s)}>Backup</button>
-            {(deletedEntries.length + deletedMeds.length + deletedFlaggedPeriods.length + deletedTreatments.length > 0) && (
+            {(deletedEntries.length + deletedMeds.length + deletedFlaggedPeriods.length + deletedTreatments.length + deletedNotes.length > 0) && (
               <button style={linkBtnSmall} onClick={() => setShowRecentlyDeleted((s) => !s)}>
-                Recently Deleted ({deletedEntries.length + deletedMeds.length + deletedFlaggedPeriods.length + deletedTreatments.length})
+                Recently Deleted ({deletedEntries.length + deletedMeds.length + deletedFlaggedPeriods.length + deletedTreatments.length + deletedNotes.length})
               </button>
             )}
           </div>
@@ -1471,7 +1585,7 @@ export default function CareLog() {
             <p style={{ fontSize: 12, color: inkSoft, margin: "0 0 10px" }}>
               Deleting never happens permanently by accident — anything you've deleted stays here until you restore it.
             </p>
-            {deletedEntries.length === 0 && deletedMeds.length === 0 && deletedFlaggedPeriods.length === 0 && deletedTreatments.length === 0 && (
+            {deletedEntries.length === 0 && deletedMeds.length === 0 && deletedFlaggedPeriods.length === 0 && deletedTreatments.length === 0 && deletedNotes.length === 0 && (
               <div style={{ fontSize: 13, color: inkSoft }}>Nothing here right now.</div>
             )}
             {deletedEntries.map((e) => {
@@ -1506,6 +1620,15 @@ export default function CareLog() {
                   <div style={{ fontSize: 12, color: inkSoft }}>{fmtTime(t.timestamp)}</div>
                 </div>
                 <button style={primaryBtnSmall} onClick={() => restoreTreatment(t.id)}>Restore</button>
+              </div>
+            ))}
+            {deletedNotes.map((n) => (
+              <div key={n.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: `1px solid ${paperDark}` }}>
+                <div>
+                  <div style={{ fontSize: 14, fontWeight: 600 }}>{n.text.length > 40 ? `${n.text.slice(0, 40)}…` : n.text}</div>
+                  <div style={{ fontSize: 12, color: inkSoft }}>{fmtTime(n.timestamp)}</div>
+                </div>
+                <button style={primaryBtnSmall} onClick={() => restoreNote(n.id)}>Restore</button>
               </div>
             ))}
             {deletedFlaggedPeriods.map((p) => (
@@ -1790,11 +1913,13 @@ export default function CareLog() {
                               {(() => {
                                 const concernMedNames = [...new Set(activeMeds.filter((m) => (m.concernIds || []).includes(g.id)).map((m) => m.name))];
                                 const concernTreatmentNames = [...new Set(activeTreatments.filter((tr) => (tr.concernIds || []).includes(g.id)).map((tr) => tr.name))];
-                                if (concernMedNames.length === 0 && concernTreatmentNames.length === 0) return null;
+                                const concernNoteCount = activeNotes.filter((n) => (n.concernIds || []).includes(g.id)).length;
+                                if (concernMedNames.length === 0 && concernTreatmentNames.length === 0 && concernNoteCount === 0) return null;
                                 return (
                                   <div style={{ fontSize: 12, color: inkSoft, marginTop: 4, marginBottom: 4 }}>
                                     {concernMedNames.length > 0 && <div>Medications: {concernMedNames.join(", ")}</div>}
                                     {concernTreatmentNames.length > 0 && <div>Treatments: {concernTreatmentNames.join(", ")}</div>}
+                                    {concernNoteCount > 0 && <div>Notes: {concernNoteCount}</div>}
                                   </div>
                                 );
                               })()}
@@ -1843,6 +1968,20 @@ export default function CareLog() {
               onAdd={addTreatment}
               onDelete={deleteTreatment}
               onUpdate={updateTreatment}
+              concerns={concerns}
+            />
+
+            <NoteSection
+              notes={activeNotes}
+              noteText={noteText}
+              setNoteText={setNoteText}
+              noteConcernIds={noteConcernIds}
+              toggleNoteConcern={toggleNoteConcern}
+              noteNewConcernName={noteNewConcernName}
+              setNoteNewConcernName={setNoteNewConcernName}
+              onAdd={addNote}
+              onDelete={deleteNote}
+              onUpdate={updateNote}
               concerns={concerns}
             />
 
@@ -2852,6 +2991,148 @@ function TreatmentSection({
               </div>
             </div>
           ))}
+        </div>
+      )}
+      </>
+      )}
+    </div>
+  );
+}
+
+function NoteSection({ notes, noteText, setNoteText, noteConcernIds, toggleNoteConcern, noteNewConcernName, setNoteNewConcernName, onAdd, onDelete, onUpdate, concerns }) {
+  const sorted = [...notes].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp)).slice(0, 8);
+  const [customTime, setCustomTime] = useState(null); // null = log at "now" (the fast default)
+  const [editingId, setEditingId] = useState(null);
+  const [editText, setEditText] = useState("");
+  const [editTime, setEditTime] = useState("");
+  const [editConcernIds, setEditConcernIds] = useState([]);
+  const [editNewConcernName, setEditNewConcernName] = useState("");
+  const [collapsed, setCollapsed] = useState(false);
+
+  function toggleEditConcern(id) {
+    setEditConcernIds((prev) => (prev.includes(id) ? prev.filter((c) => c !== id) : [...prev, id]));
+  }
+  function startEdit(n) {
+    setEditingId(n.id);
+    setEditText(n.text);
+    setEditTime(isoToLocalInput(n.timestamp));
+    setEditConcernIds(n.concernIds || []);
+    setEditNewConcernName("");
+  }
+  function cancelEdit() {
+    setEditingId(null);
+    setEditText("");
+    setEditTime("");
+    setEditConcernIds([]);
+    setEditNewConcernName("");
+  }
+  function saveEdit() {
+    if (!editText.trim()) return;
+    onUpdate(editingId, editText.trim(), editTime, editConcernIds, editNewConcernName);
+    cancelEdit();
+  }
+
+  return (
+    <div style={{ background: card, border: `1px solid ${border}`, borderRadius: 16, padding: 14, marginTop: 20, marginBottom: 16 }}>
+      <button
+        onClick={() => setCollapsed((c) => !c)}
+        style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", padding: 0, cursor: "pointer", marginBottom: collapsed ? 0 : 4 }}
+      >
+        <ChevronLeft size={16} color={inkSoft} style={{ transform: collapsed ? "rotate(-90deg)" : "rotate(-90deg) scaleY(-1)", flexShrink: 0 }} />
+        <div style={{ fontSize: 16, fontWeight: 700 }}>Notes{collapsed && notes.length > 0 ? ` (${notes.length})` : ""}</div>
+      </button>
+      {!collapsed && (
+      <>
+      <p style={{ fontSize: 12, color: inkSoft, margin: "0 0 10px" }}>
+        Time-grounded context that doesn't fit a tracker — how the day went, what changed, anything worth remembering later.
+      </p>
+      <textarea
+        placeholder="What's worth noting right now?"
+        value={noteText}
+        onChange={(e) => setNoteText(e.target.value)}
+        rows={2}
+        style={{ ...inputStyle, width: "100%", resize: "vertical", marginBottom: 8, fontFamily: "inherit" }}
+      />
+      <ConcernPicker
+        concerns={concerns}
+        selectedConcernIds={noteConcernIds}
+        toggleConcernSelection={toggleNoteConcern}
+        newConcernName={noteNewConcernName}
+        setNewConcernName={setNoteNewConcernName}
+      />
+      {customTime === null ? (
+        <button
+          onClick={() => setCustomTime(nowForInput())}
+          style={{ background: "none", border: "none", color: blue, fontSize: 12, fontWeight: 600, padding: "0 0 8px", cursor: "pointer", display: "block" }}
+        >
+          Log for a different time
+        </button>
+      ) : (
+        <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8 }}>
+          <input
+            type="datetime-local"
+            value={customTime}
+            onChange={(e) => setCustomTime(e.target.value)}
+            style={{ ...inputStyle, padding: "6px 8px", fontSize: 12, flex: 1 }}
+          />
+          <button onClick={() => setCustomTime(null)} style={{ background: "none", border: "none", color: inkSoft, fontSize: 12, cursor: "pointer" }}>
+            Use now
+          </button>
+        </div>
+      )}
+      <button
+        style={{ ...primaryBtnSmall, opacity: !noteText.trim() ? 0.5 : 1 }}
+        disabled={!noteText.trim()}
+        onClick={() => { onAdd(customTime, noteConcernIds, noteNewConcernName); setCustomTime(null); }}
+      >
+        Add note
+      </button>
+      {sorted.length > 0 && (
+        <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid ${paperDark}` }}>
+          {sorted.map((n) =>
+            editingId === n.id ? (
+              <div key={n.id} style={{ background: paper, border: `1px solid ${border}`, borderRadius: 10, padding: 8, marginBottom: 8 }}>
+                <textarea
+                  value={editText}
+                  onChange={(e) => setEditText(e.target.value)}
+                  rows={2}
+                  style={{ ...inputStyle, width: "100%", resize: "vertical", marginBottom: 6, fontFamily: "inherit", fontSize: 13 }}
+                />
+                <ConcernPicker
+                  concerns={concerns}
+                  selectedConcernIds={editConcernIds}
+                  toggleConcernSelection={toggleEditConcern}
+                  newConcernName={editNewConcernName}
+                  setNewConcernName={setEditNewConcernName}
+                />
+                <input
+                  type="datetime-local"
+                  value={editTime}
+                  onChange={(e) => setEditTime(e.target.value)}
+                  style={{ ...inputStyle, padding: "6px 8px", fontSize: 12, width: "100%", marginTop: 8, marginBottom: 6 }}
+                />
+                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  <button onClick={saveEdit} style={{ ...primaryBtnSmall, padding: "6px 12px", fontSize: 12 }}>Save</button>
+                  <button onClick={cancelEdit} style={{ background: "none", border: "none", color: inkSoft, fontSize: 12, cursor: "pointer" }}>Cancel</button>
+                  <button
+                    onClick={() => { onDelete(n.id); cancelEdit(); }}
+                    style={{ background: "none", border: "none", color: red, fontSize: 12, cursor: "pointer", marginLeft: "auto" }}
+                  >
+                    Delete
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <button
+                key={n.id}
+                onClick={() => startEdit(n)}
+                style={{ display: "block", width: "100%", textAlign: "left", background: "none", border: "none", padding: "8px 0", borderBottom: `1px solid ${paperDark}`, cursor: "pointer" }}
+              >
+                <div style={{ fontSize: 13, color: ink }}>{n.text}</div>
+                <div style={{ fontSize: 11, color: inkSoft, marginTop: 2 }}>{fmtTime(n.timestamp)}</div>
+              </button>
+            )
+          )}
         </div>
       )}
       </>
