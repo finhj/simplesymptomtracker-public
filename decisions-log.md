@@ -27,6 +27,14 @@ been decided rather than re-deriving it. "Open questions" are things flagged but
 | First-run UX | Nothing but a single "Track a symptom" button until any data exists |
 | Writing boundary | Claude never writes final prose meant to read as the user's voice (marketing copy, origin story, etc.) — outlines and brainstorming only |
 | Fact-checking | All medical/accessibility/security claims verified against multiple current, authoritative sources — disagreements flagged, not silently resolved |
+| Standalone build | `care-log-standalone.html` is generated from `care-log-prototype.jsx` via a scripted transformation (imports stripped, `window.storage` → real `localStorage`-backed `LocalStore`, lucide-react → inline SVG icons), regenerated after every source change rather than hand-edited separately, specifically to prevent the two files drifting apart |
+| PWA dependencies | CDN dependencies (React, ReactDOM, Babel Standalone) must be version-pinned to a major version (e.g. `@7`, `@18`), never left unpinned — an unpinned Babel silently jumped to a breaking major version (v8's JSX runtime default change) and caused a fully blank page with no error |
+| Service worker caching | Network-first with cache fallback, not cache-first — cache-first was silently serving stale content and required two reloads to show any update, a bad fit for an actively-developed app; cache name gets bumped on every meaningful change to force a clean slate |
+| Chart time domain | All tracker charts and medication markers share one synchronized timeline (not independently computed per chart), adjustable via pinch/drag gesture or 24h/3d/7d/All preset buttons, clamped to the real logged data range with a minimum zoom span |
+| Medication chart display | No on-chart text labels for medications (repeated overlap/cutoff/hard-to-read problems with diagonal text) — markers are diamonds in a dedicated row below the plot, full detail lives in a tap-to-expand "Medications in view" list scoped to the chart's current visible range |
+| Temperature value labels | Bounded, not all-or-nothing: label every point when ≤8 are visible, otherwise always show exactly "Now" and "Peak" (never fully unlabeled, never cluttered) at any zoom level |
+| Data editing | Both symptom entries and medications are fully editable (value/name/dose and timestamp) and deletable after logging, not just deletable |
+| Logging discipline | Claude adds a row to `ai-usage-log.md` and `decisions-log.md` immediately within the same turn as any substantive change, not deferred to a later "catch-up" — see note at the bottom of this file |
 
 ## Open questions (not yet decided)
 
@@ -38,3 +46,17 @@ been decided rather than re-deriving it. "Open questions" are things flagged but
 - Open-source PR review policy for security-sensitive code paths
 - Cross-channel patch strategy (F-Droid review lag vs. instant web deploys)
 - Support/refund/cancellation channel, given there's no account/login system
+
+## Logging discipline (added after a gap where both logs fell behind)
+
+Both `ai-usage-log.md` and `decisions-log.md` fell about 30 messages behind actual work during
+one long build/debug session — the standing rule existed but wasn't being followed in practice
+during rapid back-to-back edits. Fix going forward:
+
+- **Log immediately, same turn, before presenting files** — not "I'll log this later," which is
+  exactly what caused the gap. If a change is worth telling the user about, it's worth one line here.
+- **Keep entries short** — a single row, not a paragraph. Low friction is what makes it sustainable
+  across many small edits in a row, rather than something that only happens at natural checkpoints.
+- **Bug fixes and root-cause diagnoses get logged too**, not just new features — several of the
+  most important entries in this project (the Babel 8 issue, the service worker caching strategy)
+  were debugging work, not feature work, and are exactly the kind of thing worth a durable record.
