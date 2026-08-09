@@ -201,7 +201,7 @@ function sleep(ms) {
 }
 
 // ---------- Lightweight sparkline (no chart library — fast load) ----------
-function Sparkline({ points, kind, unitSystem, scaleMax, meds, domain, onViewChange }) {
+function Sparkline({ points, kind, unitSystem, scaleMax, meds, treatments, flaggedPeriods, domain, onViewChange }) {
   const svgRef = useRef(null);
   const gestureRef = useRef(null);
   const [showMedList, setShowMedList] = useState(false);
@@ -243,6 +243,23 @@ function Sparkline({ points, kind, unitSystem, scaleMax, meds, domain, onViewCha
   const last = display[display.length - 1];
   const axisLabelStyle = { fontSize: 9, fill: inkSoft, fontFamily: "-apple-system, sans-serif" };
   const span = maxX - minX;
+
+  // Flagged periods (relapses, flares, etc.) that overlap this chart's visible range,
+  // rendered as a shaded background band spanning their date range. An open-ended
+  // period (no end date yet) is drawn out to the right edge of the visible chart.
+  const flaggedPeriodBands = (flaggedPeriods || [])
+    .map((p) => {
+      const startT = new Date(p.startDate + "T00:00:00").getTime();
+      const endT = p.endDate ? new Date(p.endDate + "T23:59:59").getTime() : maxX;
+      return { ...p, startT, endT };
+    })
+    .filter((p) => p.endT >= minX && p.startT <= maxX)
+    .map((p) => ({
+      ...p,
+      x1: scaleX(Math.max(p.startT, minX)),
+      x2: scaleX(Math.min(p.endT, maxX)),
+    }));
+
   function fmtAxisTime(t) {
     const dt = new Date(t);
     return span <= 48 * 3600 * 1000
@@ -308,22 +325,29 @@ function Sparkline({ points, kind, unitSystem, scaleMax, meds, domain, onViewCha
   // vertically so their diagonal lines don't run through each other.
   const medSpan = Math.max(maxX - minX, 1);
   const medPad = medSpan * 0.05;
-  const medsInRange = (meds || [])
+  // Medications and treatments share one timeline of "clinical events" — same
+  // positioning, staggering, and per-name coloring, distinguished only by marker
+  // shape (diamond vs. circle) since they're conceptually the same shape of thing
+  // (something administered at a point in time), just self-taken vs. clinic-given.
+  const medsInRange = [
+    ...(meds || []).map((m) => ({ ...m, itemKind: "medication" })),
+    ...(treatments || []).map((t) => ({ ...t, itemKind: "treatment" })),
+  ]
     .map((m) => ({ ...m, t: new Date(m.timestamp).getTime() }))
     .filter((m) => m.t >= minX - medPad && m.t <= maxX + medPad)
     .sort((a, b) => a.t - b.t);
-  // Chart markers: one diamond per individual dose, never merged — two drugs taken
-  // together are still two separate doses and get two separate, differently-colored
-  // markers, even though they're staggered close together for visibility. The
+  // Chart markers: one marker per individual dose/session, never merged — two things
+  // taken together are still two separate events and get two separate, differently-
+  // colored markers, even though they're staggered close together for visibility. The
   // grouped/combined version (chartMedGroups below) is only used for the readable
-  // tap-to-expand list, where combining same-time doses onto one line is purely a
+  // tap-to-expand list, where combining same-time events onto one line is purely a
   // display convenience, not a change to the underlying data.
   const chartMedGroups = groupMedsByDisplayTime(medsInRange).map((g) => ({
     label: g.items.map(medLabel).join(", "),
     t: g.items[0].t,
     id: g.items[0].id,
   }));
-  // Medication markers get their own row below the plot, not inside the
+  // Medication/treatment markers get their own row below the plot, not inside the
   // temperature/value range — this keeps them visually distinct from real data
   // points regardless of how low a reading happens to be.
   const MED_ROW_GAP = 10;
@@ -384,7 +408,17 @@ function Sparkline({ points, kind, unitSystem, scaleMax, meds, domain, onViewCha
         onTouchEnd={handleTouchEnd}
         onTouchCancel={handleTouchEnd}
         role="img"
-        aria-label={`Trend chart from ${fmtAxisTime(minX)} to ${fmtAxisTime(maxX)}, scale ${minY} to ${maxY}${unit}, latest value ${last.v.toFixed(1)}${unit}${staggeredMeds.length ? `. Medications in range: ${staggeredMeds.map(medLabel).join("; ")}` : ""}`}>
+        aria-label={`Trend chart from ${fmtAxisTime(minX)} to ${fmtAxisTime(maxX)}, scale ${minY} to ${maxY}${unit}, latest value ${last.v.toFixed(1)}${unit}${staggeredMeds.length ? `. Medications in range: ${staggeredMeds.map(medLabel).join("; ")}` : ""}${flaggedPeriodBands.length ? `. Flagged periods: ${flaggedPeriodBands.map((p) => p.label).join("; ")}` : ""}`}>
+        {/* Flagged periods (relapses, flares, etc.) render first, as a background band
+            behind everything else — a labeled stretch of time, not a specific reading. */}
+        {flaggedPeriodBands.map((p) => (
+          <g key={p.id}>
+            <rect x={p.x1} y={pad} width={Math.max(p.x2 - p.x1, 2)} height={height - pad * 2} fill={amberSoft} opacity={0.6} />
+            <text x={p.x1 + 3} y={pad + 9} fontSize={8} fontWeight={700} fill="#8A6D2B" fontFamily="-apple-system, sans-serif">
+              {p.label}
+            </text>
+          </g>
+        ))}
         {kind === "temperature" && (
           <rect x={chartLeft} y={scaleY(feverLine)} width={plotWidth} height={Math.max(scaleY(maxY) - scaleY(feverLine), 0)} fill={redSoft} opacity={0.5} />
         )}
@@ -422,19 +456,29 @@ function Sparkline({ points, kind, unitSystem, scaleMax, meds, domain, onViewCha
             </text>
           </g>
         ))}
-        {/* One diamond per individual dose, colored by drug — two medications taken
+        {/* One marker per individual dose/session, colored by name — two things taken
             together are still two markers, just staggered close together, never
-            merged into one. Below the plot, in their own row, so they can never be
-            confused with the actual data dots. The "Medications in view" list below
-            is the readable source for names/doses/times; these just mark when/what. */}
-        {showMedMarkers && staggeredMeds.map((m) => (
-          <rect
-            key={m.id}
-            x={-4.5} y={-4.5} width={9} height={9} rx={1.5}
-            fill={m.color} stroke={card} strokeWidth={1.5}
-            transform={`translate(${m.x}, ${medBaseY + m.extraLift}) rotate(45)`}
-          />
-        ))}
+            merged into one. Diamonds are medications, circles are treatments — same
+            positioning and coloring, shape is the only difference. Below the plot,
+            in their own row, so they can never be confused with the actual data dots.
+            The "Medications & treatments in view" list below is the readable source
+            for names/details/times; these just mark when/what. */}
+        {showMedMarkers && staggeredMeds.map((m) =>
+          m.itemKind === "treatment" ? (
+            <circle
+              key={m.id}
+              cx={m.x} cy={medBaseY + m.extraLift} r={4.5}
+              fill={m.color} stroke={card} strokeWidth={1.5}
+            />
+          ) : (
+            <rect
+              key={m.id}
+              x={-4.5} y={-4.5} width={9} height={9} rx={1.5}
+              fill={m.color} stroke={card} strokeWidth={1.5}
+              transform={`translate(${m.x}, ${medBaseY + m.extraLift}) rotate(45)`}
+            />
+          )
+        )}
       </svg>
 
       {medsInRange.length > 0 && (
@@ -443,7 +487,7 @@ function Sparkline({ points, kind, unitSystem, scaleMax, meds, domain, onViewCha
             onClick={() => setShowMedList((s) => !s)}
             style={{ background: "none", border: "none", color: blue, fontSize: 11, fontWeight: 600, padding: 0, cursor: "pointer" }}
           >
-            {showMedList ? "Hide medications" : `Medications in view (${medsInRange.length})`}
+            {showMedList ? "Hide" : `Medications & treatments in view (${medsInRange.length})`}
           </button>
           <label style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11, color: inkSoft, cursor: "pointer" }}>
             <input
@@ -466,7 +510,7 @@ function Sparkline({ points, kind, unitSystem, scaleMax, meds, domain, onViewCha
                     {g.items.map((m, i) => (
                       <span key={m.id} style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 12 }}>
                         {i > 0 && <span style={{ color: inkSoft }}>,</span>}
-                        <span style={{ width: 8, height: 8, borderRadius: 2, background: medColorForName(m.name), display: "inline-block", flexShrink: 0 }} />
+                        <span style={{ width: 8, height: 8, borderRadius: m.itemKind === "treatment" ? "50%" : 2, background: medColorForName(m.name), display: "inline-block", flexShrink: 0 }} />
                         <span style={{ color: ink, fontWeight: 600 }}>{medLabel(m)}</span>
                       </span>
                     ))}
@@ -514,6 +558,14 @@ export default function CareLog() {
   const [dashboardViewMode, setDashboardViewMode] = useState("all"); // "all" | "byConcern"
 
   const [customTrackerDefs, setCustomTrackerDefs] = useState([]); // [{id, name, type, scaleMax}] — reusable, not tied to any one addition
+  const [flaggedPeriods, setFlaggedPeriods] = useState([]); // [{id, concernId, label, startDate, endDate, deletedAt}] — relapses, flares, or any other labeled period
+  const [treatments, setTreatments] = useState([]); // [{id, name, dose, timestamp, deletedAt}] — ECT, ketamine infusions, chemo, physical therapy, etc.; same shape as meds but clinic-administered, not self-taken
+  const [treatmentName, setTreatmentName] = useState("");
+  const [treatmentDetail, setTreatmentDetail] = useState("");
+  const [markPeriodConcernId, setMarkPeriodConcernId] = useState(null); // which concern's "mark a period" form is open
+  const [periodLabelInput, setPeriodLabelInput] = useState("Relapse");
+  const [periodStartInput, setPeriodStartInput] = useState("");
+  const [periodEndInput, setPeriodEndInput] = useState("");
   const [showCustomTrackerForm, setShowCustomTrackerForm] = useState(false);
   const [customTrackerNameInput, setCustomTrackerNameInput] = useState("");
   const [customTrackerType, setCustomTrackerType] = useState("scale");
@@ -552,9 +604,9 @@ export default function CareLog() {
   }, []);
 
   // ---------- Persist (encrypt + save) ----------
-  const persist = useCallback(async (nextTrackers, nextEntries, nextMeds, nextProfile, nextConcerns, nextCustomDefs) => {
+  const persist = useCallback(async (nextTrackers, nextEntries, nextMeds, nextProfile, nextConcerns, nextCustomDefs, nextFlaggedPeriods, nextTreatments) => {
     if (!cryptoKeyRef.current) return;
-    const payload = { trackers: nextTrackers, entries: nextEntries, meds: nextMeds, profile: nextProfile, concerns: nextConcerns, customTrackerDefs: nextCustomDefs };
+    const payload = { trackers: nextTrackers, entries: nextEntries, meds: nextMeds, profile: nextProfile, concerns: nextConcerns, customTrackerDefs: nextCustomDefs, flaggedPeriods: nextFlaggedPeriods, treatments: nextTreatments };
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
         const { iv, ciphertext } = await encryptJSON(cryptoKeyRef.current, payload);
@@ -578,9 +630,9 @@ export default function CareLog() {
       skippedInitialPersist.current = true;
       return;
     }
-    persist(trackers, entries, meds, profile, concerns, customTrackerDefs);
+    persist(trackers, entries, meds, profile, concerns, customTrackerDefs, flaggedPeriods, treatments);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [trackers, entries, meds, profile, concerns, customTrackerDefs]);
+  }, [trackers, entries, meds, profile, concerns, customTrackerDefs, flaggedPeriods, treatments]);
 
   // ---------- Setup (first run — create passcode) ----------
   async function handleCreatePasscode() {
@@ -622,7 +674,7 @@ export default function CareLog() {
       return;
     }
     try {
-      const { iv, ciphertext } = await encryptJSON(cryptoKeyRef.current, { trackers: [], entries: [], meds: [], profile: nextProfile, concerns: [], customTrackerDefs: [] });
+      const { iv, ciphertext } = await encryptJSON(cryptoKeyRef.current, { trackers: [], entries: [], meds: [], profile: nextProfile, concerns: [], customTrackerDefs: [], flaggedPeriods: [], treatments: [] });
       const vault = { saltB64: saltRef.current, iterations: PBKDF2_ITERATIONS, iv, ciphertext };
       const result = await window.storage.set(STORAGE_KEY, JSON.stringify(vault), false);
       if (!result) throw new Error("storage.set returned no result");
@@ -650,6 +702,8 @@ export default function CareLog() {
       setMeds(data.meds || []);
       setConcerns(data.concerns || []);
       setCustomTrackerDefs(data.customTrackerDefs || []);
+      setFlaggedPeriods(data.flaggedPeriods || []);
+      setTreatments(data.treatments || []);
       setProfile(data.profile || { ageYears: "", ageMonths: "", ethnicity: "", unitSystem: "imperial" });
       skippedInitialPersist.current = true;
       setPasscodeInput("");
@@ -676,7 +730,7 @@ export default function CareLog() {
   }
 
   async function handleExportBackup() {
-    await downloadEncryptedBackup({ trackers, entries, meds, profile, concerns, customTrackerDefs }, "manual");
+    await downloadEncryptedBackup({ trackers, entries, meds, profile, concerns, customTrackerDefs, flaggedPeriods, treatments }, "manual");
   }
 
   async function handleRestoreFromFile(file, passcode, isFirstRun) {
@@ -699,7 +753,7 @@ export default function CareLog() {
       // not just a same-session convenience that's gone the moment the tab closes.
       if (!isFirstRun) {
         await downloadEncryptedBackup(
-          { trackers, entries, meds, profile, concerns, customTrackerDefs },
+          { trackers, entries, meds, profile, concerns, customTrackerDefs, flaggedPeriods, treatments },
           "before-restore"
         );
       }
@@ -711,13 +765,15 @@ export default function CareLog() {
       setMeds(data.meds || []);
       setConcerns(data.concerns || []);
       setCustomTrackerDefs(data.customTrackerDefs || []);
+      setFlaggedPeriods(data.flaggedPeriods || []);
+      setTreatments(data.treatments || []);
       setProfile(data.profile || { ageYears: "", ageMonths: "", ethnicity: "", unitSystem: "imperial" });
       skippedInitialPersist.current = true;
       setRestoreSuccess(true);
       if (isFirstRun) {
         setPhase("ready");
       } else {
-        await persist(data.trackers || [], data.entries || [], data.meds || [], data.profile || profile, data.concerns || [], data.customTrackerDefs || []);
+        await persist(data.trackers || [], data.entries || [], data.meds || [], data.profile || profile, data.concerns || [], data.customTrackerDefs || [], data.flaggedPeriods || [], data.treatments || []);
         setShowBackup(false);
       }
     } catch (e) {
@@ -741,6 +797,16 @@ export default function CareLog() {
   const deletedMeds = useMemo(
     () => meds.filter((m) => m.deletedAt).sort((a, b) => new Date(b.deletedAt) - new Date(a.deletedAt)),
     [meds]
+  );
+  const activeFlaggedPeriods = useMemo(() => flaggedPeriods.filter((p) => !p.deletedAt), [flaggedPeriods]);
+  const deletedFlaggedPeriods = useMemo(
+    () => flaggedPeriods.filter((p) => p.deletedAt).sort((a, b) => new Date(b.deletedAt) - new Date(a.deletedAt)),
+    [flaggedPeriods]
+  );
+  const activeTreatments = useMemo(() => treatments.filter((t) => !t.deletedAt), [treatments]);
+  const deletedTreatments = useMemo(
+    () => treatments.filter((t) => t.deletedAt).sort((a, b) => new Date(b.deletedAt) - new Date(a.deletedAt)),
+    [treatments]
   );
 
   // Absolute bounds — the full span of everything logged. Zoom/pan and range
@@ -1026,12 +1092,76 @@ export default function CareLog() {
     setMeds((prev) => prev.map((m) => (m.id === id ? { ...m, deletedAt: undefined } : m)));
   }
 
+  // ---------- Flagged periods (relapses, flares, or any other labeled period) ----------
+  function openMarkPeriodForm(concernId) {
+    setMarkPeriodConcernId(concernId);
+    setPeriodLabelInput("Relapse");
+    setPeriodStartInput(new Date().toISOString().slice(0, 10));
+    setPeriodEndInput("");
+  }
+
+  function cancelMarkPeriodForm() {
+    setMarkPeriodConcernId(null);
+  }
+
+  function addFlaggedPeriod() {
+    const label = periodLabelInput.trim();
+    if (!label || !periodStartInput) return;
+    const newPeriod = {
+      id: uid(),
+      concernId: markPeriodConcernId,
+      label,
+      startDate: periodStartInput,
+      endDate: periodEndInput || null, // no end date = ongoing
+    };
+    setFlaggedPeriods((prev) => [...prev, newPeriod]);
+    setMarkPeriodConcernId(null);
+  }
+
+  function deleteFlaggedPeriod(id) {
+    setFlaggedPeriods((prev) => prev.map((p) => (p.id === id ? { ...p, deletedAt: new Date().toISOString() } : p)));
+  }
+
+  function restoreFlaggedPeriod(id) {
+    setFlaggedPeriods((prev) => prev.map((p) => (p.id === id ? { ...p, deletedAt: undefined } : p)));
+  }
+
   function updateMed(id, newName, newDose, newTimeInput) {
     setMeds((prev) =>
       prev.map((m) =>
         m.id === id
           ? { ...m, name: newName, dose: newDose, timestamp: newTimeInput ? new Date(newTimeInput).toISOString() : m.timestamp }
           : m
+      )
+    );
+  }
+
+  // ---------- Treatments (ECT, ketamine infusions, chemo, physical therapy, etc.) ----------
+  // Same shape and pattern as medications — clinic-administered rather than self-taken,
+  // so kept as a separate list/section rather than mixed into the medication log.
+  function addTreatment(atTime) {
+    const name = treatmentName.trim();
+    if (!name) return;
+    const timestamp = atTime ? new Date(atTime).toISOString() : new Date().toISOString();
+    setTreatments((prev) => [...prev, { id: uid(), name, dose: treatmentDetail.trim(), timestamp }]);
+    setTreatmentName("");
+    setTreatmentDetail("");
+  }
+
+  function deleteTreatment(id) {
+    setTreatments((prev) => prev.map((t) => (t.id === id ? { ...t, deletedAt: new Date().toISOString() } : t)));
+  }
+
+  function restoreTreatment(id) {
+    setTreatments((prev) => prev.map((t) => (t.id === id ? { ...t, deletedAt: undefined } : t)));
+  }
+
+  function updateTreatment(id, newName, newDetail, newTimeInput) {
+    setTreatments((prev) =>
+      prev.map((t) =>
+        t.id === id
+          ? { ...t, name: newName, dose: newDetail, timestamp: newTimeInput ? new Date(newTimeInput).toISOString() : t.timestamp }
+          : t
       )
     );
   }
@@ -1059,8 +1189,17 @@ export default function CareLog() {
     else groupMedsByDisplayTime(recentMeds).forEach((g) =>
       lines.push(`  ${g.label} — ${g.items.map(medLabel).join(", ")}`)
     );
+    lines.push("");
+    const recentTreatments = activeTreatments
+      .filter((t) => new Date(t.timestamp) >= since)
+      .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+    lines.push("Treatments:");
+    if (recentTreatments.length === 0) lines.push("  none logged");
+    else groupMedsByDisplayTime(recentTreatments).forEach((g) =>
+      lines.push(`  ${g.label} — ${g.items.map(medLabel).join(", ")}`)
+    );
     return lines.join("\n");
-  }, [activeTrackers, activeEntries, activeMeds, profile.unitSystem]);
+  }, [activeTrackers, activeEntries, activeMeds, activeTreatments, profile.unitSystem]);
 
   async function copyReport() {
     try {
@@ -1181,9 +1320,9 @@ export default function CareLog() {
             </button>
             <button style={linkBtnSmall} onClick={() => setShowSettings((s) => !s)}>Units</button>
             <button style={linkBtnSmall} onClick={() => setShowBackup((s) => !s)}>Backup</button>
-            {(deletedEntries.length + deletedMeds.length > 0) && (
+            {(deletedEntries.length + deletedMeds.length + deletedFlaggedPeriods.length + deletedTreatments.length > 0) && (
               <button style={linkBtnSmall} onClick={() => setShowRecentlyDeleted((s) => !s)}>
-                Recently Deleted ({deletedEntries.length + deletedMeds.length})
+                Recently Deleted ({deletedEntries.length + deletedMeds.length + deletedFlaggedPeriods.length + deletedTreatments.length})
               </button>
             )}
           </div>
@@ -1195,7 +1334,7 @@ export default function CareLog() {
             <p style={{ fontSize: 12, color: inkSoft, margin: "0 0 10px" }}>
               Deleting never happens permanently by accident — anything you've deleted stays here until you restore it.
             </p>
-            {deletedEntries.length === 0 && deletedMeds.length === 0 && (
+            {deletedEntries.length === 0 && deletedMeds.length === 0 && deletedFlaggedPeriods.length === 0 && deletedTreatments.length === 0 && (
               <div style={{ fontSize: 13, color: inkSoft }}>Nothing here right now.</div>
             )}
             {deletedEntries.map((e) => {
@@ -1221,6 +1360,24 @@ export default function CareLog() {
                   <div style={{ fontSize: 12, color: inkSoft }}>{fmtTime(m.timestamp)}</div>
                 </div>
                 <button style={primaryBtnSmall} onClick={() => restoreMed(m.id)}>Restore</button>
+              </div>
+            ))}
+            {deletedTreatments.map((t) => (
+              <div key={t.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: `1px solid ${paperDark}` }}>
+                <div>
+                  <div style={{ fontSize: 14, fontWeight: 600 }}>{medLabel(t)}</div>
+                  <div style={{ fontSize: 12, color: inkSoft }}>{fmtTime(t.timestamp)}</div>
+                </div>
+                <button style={primaryBtnSmall} onClick={() => restoreTreatment(t.id)}>Restore</button>
+              </div>
+            ))}
+            {deletedFlaggedPeriods.map((p) => (
+              <div key={p.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: `1px solid ${paperDark}` }}>
+                <div>
+                  <div style={{ fontSize: 14, fontWeight: 600 }}>{p.label}</div>
+                  <div style={{ fontSize: 12, color: inkSoft }}>{p.startDate}{p.endDate ? ` – ${p.endDate}` : " (ongoing)"}</div>
+                </div>
+                <button style={primaryBtnSmall} onClick={() => restoreFlaggedPeriod(p.id)}>Restore</button>
               </div>
             ))}
           </div>
@@ -1322,6 +1479,10 @@ export default function CareLog() {
           </div>
         ) : (
           <>
+            <button style={{ ...secondaryTrackBtn, marginBottom: 14 }} onClick={() => setView("templatePicker")}>
+              <Plus size={18} style={{ marginRight: 6 }} /> Track a symptom
+            </button>
+
             {activeTrackers.length > 0 && chartDomain && (
               <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 10, flexWrap: "wrap" }}>
                 {[
@@ -1359,6 +1520,8 @@ export default function CareLog() {
                   history={entriesForTracker(t.id)}
                   unitSystem={profile.unitSystem}
                   meds={activeMeds}
+                  treatments={activeTreatments}
+                  flaggedPeriods={activeFlaggedPeriods}
                   domain={chartDomain}
                   onViewChange={handleViewChange}
                   draftValue={draftValues[t.id]}
@@ -1401,14 +1564,93 @@ export default function CareLog() {
                     ? activeTrackers.map((t) => renderCard(t, "flat"))
                     : (
                       <>
-                        {concernGroups.map((g) => (
-                          <div key={g.id} style={{ marginBottom: 16 }}>
-                            <div style={{ fontSize: 14, fontWeight: 700, color: inkSoft, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 8 }}>
-                              {g.name}
+                        {concernGroups.map((g) => {
+                          const periodsForConcern = activeFlaggedPeriods.filter((p) => p.concernId === g.id);
+                          return (
+                            <div key={g.id} style={{ marginBottom: 16 }}>
+                              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+                                <div style={{ fontSize: 14, fontWeight: 700, color: inkSoft, textTransform: "uppercase", letterSpacing: 0.4 }}>
+                                  {g.name}
+                                </div>
+                                <button
+                                  onClick={() => openMarkPeriodForm(g.id)}
+                                  style={{ background: "none", border: "none", color: blue, fontSize: 12, fontWeight: 600, cursor: "pointer" }}
+                                >
+                                  + Mark a period
+                                </button>
+                              </div>
+
+                              {periodsForConcern.length > 0 && (
+                                <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
+                                  {periodsForConcern.map((p) => (
+                                    <span
+                                      key={p.id}
+                                      style={{
+                                        display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12,
+                                        background: amberSoft, color: ink, padding: "4px 8px", borderRadius: 999,
+                                      }}
+                                    >
+                                      <strong>{p.label}</strong>: {p.startDate}{p.endDate ? ` – ${p.endDate}` : " (ongoing)"}
+                                      <button
+                                        aria-label={`Remove ${p.label} period`}
+                                        onClick={() => deleteFlaggedPeriod(p.id)}
+                                        style={{ background: "none", border: "none", cursor: "pointer", padding: 0, display: "flex", color: inkSoft }}
+                                      >
+                                        <X size={12} />
+                                      </button>
+                                    </span>
+                                  ))}
+                                </div>
+                              )}
+
+                              {markPeriodConcernId === g.id && (
+                                <div style={{ background: card, border: `1px solid ${border}`, borderRadius: 12, padding: 12, marginBottom: 10 }}>
+                                  <label style={{ fontSize: 12, fontWeight: 600, color: inkSoft, display: "block", marginBottom: 4 }}>Label</label>
+                                  <input
+                                    value={periodLabelInput}
+                                    onChange={(e) => setPeriodLabelInput(e.target.value)}
+                                    placeholder="Relapse, flare-up, etc."
+                                    style={{ ...inputStyle, fontSize: 13, padding: "8px 10px", marginBottom: 8 }}
+                                  />
+                                  <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+                                    <div style={{ flex: 1 }}>
+                                      <label style={{ fontSize: 12, fontWeight: 600, color: inkSoft, display: "block", marginBottom: 4 }}>Start</label>
+                                      <input
+                                        type="date"
+                                        value={periodStartInput}
+                                        onChange={(e) => setPeriodStartInput(e.target.value)}
+                                        style={{ ...inputStyle, fontSize: 13, padding: "8px 10px" }}
+                                      />
+                                    </div>
+                                    <div style={{ flex: 1 }}>
+                                      <label style={{ fontSize: 12, fontWeight: 600, color: inkSoft, display: "block", marginBottom: 4 }}>End (optional)</label>
+                                      <input
+                                        type="date"
+                                        value={periodEndInput}
+                                        onChange={(e) => setPeriodEndInput(e.target.value)}
+                                        style={{ ...inputStyle, fontSize: 13, padding: "8px 10px" }}
+                                      />
+                                    </div>
+                                  </div>
+                                  <div style={{ display: "flex", gap: 8 }}>
+                                    <button
+                                      style={{ ...primaryBtnSmall, opacity: periodLabelInput.trim() && periodStartInput ? 1 : 0.5 }}
+                                      disabled={!periodLabelInput.trim() || !periodStartInput}
+                                      onClick={addFlaggedPeriod}
+                                    >
+                                      Save
+                                    </button>
+                                    <button onClick={cancelMarkPeriodForm} style={{ background: "none", border: "none", color: inkSoft, fontSize: 13, cursor: "pointer" }}>
+                                      Cancel
+                                    </button>
+                                  </div>
+                                </div>
+                              )}
+
+                              {g.trackers.map((t) => renderCard(t, g.id))}
                             </div>
-                            {g.trackers.map((t) => renderCard(t, g.id))}
-                          </div>
-                        ))}
+                          );
+                        })}
                         {ungrouped.length > 0 && (
                           <div>
                             <div style={{ fontSize: 14, fontWeight: 700, color: inkSoft, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 8 }}>
@@ -1423,10 +1665,6 @@ export default function CareLog() {
               );
             })()}
 
-            <button style={secondaryTrackBtn} onClick={() => setView("templatePicker")}>
-              <Plus size={18} style={{ marginRight: 6 }} /> Track a symptom
-            </button>
-
             <MedicationSection
               meds={activeMeds}
               medName={medName}
@@ -1438,6 +1676,17 @@ export default function CareLog() {
               onUpdate={updateMed}
               catalogCount={medCatalogCount}
               knownMedNames={knownMedNames}
+            />
+
+            <TreatmentSection
+              treatments={activeTreatments}
+              treatmentName={treatmentName}
+              setTreatmentName={setTreatmentName}
+              treatmentDetail={treatmentDetail}
+              setTreatmentDetail={setTreatmentDetail}
+              onAdd={addTreatment}
+              onDelete={deleteTreatment}
+              onUpdate={updateTreatment}
             />
 
             <ReportSection
@@ -1485,7 +1734,7 @@ function Field({ label, children }) {
   );
 }
 
-function TrackerCard({ tracker, series, latest, history, unitSystem, meds, domain, onViewChange, draftValue, onDraftChange, onLog, onArchive, onUpdateEntry, onDeleteEntry }) {
+function TrackerCard({ tracker, series, latest, history, unitSystem, meds, treatments, flaggedPeriods, domain, onViewChange, draftValue, onDraftChange, onLog, onArchive, onUpdateEntry, onDeleteEntry }) {
   const unitLabel = tracker.type === "temperature" ? tempUnitLabel(unitSystem) : null;
   const [customTime, setCustomTime] = useState(null); // null = log at "now" (the fast default)
   const [showHistory, setShowHistory] = useState(false);
@@ -1529,7 +1778,7 @@ function TrackerCard({ tracker, series, latest, history, unitSystem, meds, domai
       </div>
 
       <div style={{ display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap" }}>
-        <Sparkline points={series} kind={tracker.type} unitSystem={unitSystem} scaleMax={tracker.scaleMax} meds={tracker.type !== "boolean" ? meds : null} domain={domain} onViewChange={onViewChange} />
+        <Sparkline points={series} kind={tracker.type} unitSystem={unitSystem} scaleMax={tracker.scaleMax} meds={tracker.type !== "boolean" ? meds : null} treatments={tracker.type !== "boolean" ? treatments : null} flaggedPeriods={flaggedPeriods} domain={domain} onViewChange={onViewChange} />
         <div style={{ flex: 1, minWidth: 140 }}>
           {tracker.type === "temperature" && (
             <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
@@ -2062,6 +2311,118 @@ function MedicationSection({ meds, medName, setMedName, medDose, setMedDose, onA
                       {i > 0 && <span style={{ color: inkSoft, marginRight: 2 }}>,</span>}
                       <button onClick={() => startEdit(m)} style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontSize: 14, color: ink, textDecoration: "underline", textDecorationColor: border }}>
                         {medLabel(m)}
+                      </button>
+                    </span>
+                  )
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TreatmentSection({ treatments, treatmentName, setTreatmentName, treatmentDetail, setTreatmentDetail, onAdd, onDelete, onUpdate }) {
+  const sorted = [...treatments].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp)).slice(0, 6);
+  const grouped = groupMedsByDisplayTime(sorted); // same time-grouping helper works for any {name, dose, timestamp}-shaped item
+  const [customTime, setCustomTime] = useState(null); // null = log at "now" (the fast default)
+  const [editingId, setEditingId] = useState(null);
+  const [editName, setEditName] = useState("");
+  const [editDetail, setEditDetail] = useState("");
+  const [editTime, setEditTime] = useState("");
+
+  function startEdit(t) {
+    setEditingId(t.id);
+    setEditName(t.name);
+    setEditDetail(t.dose || "");
+    setEditTime(isoToLocalInput(t.timestamp));
+  }
+  function cancelEdit() {
+    setEditingId(null);
+    setEditName("");
+    setEditDetail("");
+    setEditTime("");
+  }
+  function saveEdit() {
+    if (!editName.trim()) return;
+    onUpdate(editingId, editName.trim(), editDetail.trim(), editTime);
+    cancelEdit();
+  }
+
+  return (
+    <div style={{ background: card, border: `1px solid ${border}`, borderRadius: 16, padding: 14, marginTop: 20, marginBottom: 16 }}>
+      <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 4 }}>Treatments</div>
+      <p style={{ fontSize: 12, color: inkSoft, margin: "0 0 10px" }}>
+        ECT, ketamine or chemo infusions, physical therapy, or anything else administered rather than self-taken.
+      </p>
+      <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+        <input placeholder="Physical therapy" value={treatmentName} onChange={(e) => setTreatmentName(e.target.value)} style={{ ...inputStyle, flex: 1.4 }} />
+        <input placeholder="Detail (optional)" value={treatmentDetail} onChange={(e) => setTreatmentDetail(e.target.value)} style={{ ...inputStyle, flex: 1 }} />
+      </div>
+      {customTime === null ? (
+        <button
+          onClick={() => setCustomTime(nowForInput())}
+          style={{ background: "none", border: "none", color: blue, fontSize: 12, fontWeight: 600, padding: "0 0 8px", cursor: "pointer", display: "block" }}
+        >
+          Log for a different time
+        </button>
+      ) : (
+        <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8 }}>
+          <input
+            type="datetime-local"
+            value={customTime}
+            onChange={(e) => setCustomTime(e.target.value)}
+            style={{ ...inputStyle, padding: "6px 8px", fontSize: 12, flex: 1 }}
+          />
+          <button onClick={() => setCustomTime(null)} style={{ background: "none", border: "none", color: inkSoft, fontSize: 12, cursor: "pointer" }}>
+            Use now
+          </button>
+        </div>
+      )}
+      <button
+        style={{ ...primaryBtnSmall, opacity: !treatmentName.trim() ? 0.5 : 1 }}
+        disabled={!treatmentName.trim()}
+        onClick={() => { onAdd(customTime); setCustomTime(null); }}
+      >
+        Add treatment
+      </button>
+      {grouped.length > 0 && (
+        <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid ${paperDark}` }}>
+          {grouped.map((g) => (
+            <div key={g.label + g.items[0].id} style={{ padding: "6px 0" }}>
+              <div style={{ color: inkSoft, fontSize: 12, marginBottom: 2 }}>{g.label}</div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 4, alignItems: "center" }}>
+                {g.items.map((t, i) =>
+                  editingId === t.id ? (
+                    <div key={t.id} style={{ width: "100%", background: paper, border: `1px solid ${border}`, borderRadius: 10, padding: 8, marginTop: 4 }}>
+                      <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
+                        <input value={editName} onChange={(e) => setEditName(e.target.value)} style={{ ...inputStyle, padding: "6px 8px", fontSize: 13, flex: 1.4 }} />
+                        <input value={editDetail} onChange={(e) => setEditDetail(e.target.value)} style={{ ...inputStyle, padding: "6px 8px", fontSize: 13, flex: 1 }} />
+                      </div>
+                      <input
+                        type="datetime-local"
+                        value={editTime}
+                        onChange={(e) => setEditTime(e.target.value)}
+                        style={{ ...inputStyle, padding: "6px 8px", fontSize: 12, width: "100%", marginBottom: 6 }}
+                      />
+                      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                        <button onClick={saveEdit} style={{ ...primaryBtnSmall, padding: "6px 12px", fontSize: 12 }}>Save</button>
+                        <button onClick={cancelEdit} style={{ background: "none", border: "none", color: inkSoft, fontSize: 12, cursor: "pointer" }}>Cancel</button>
+                        <button
+                          onClick={() => { onDelete(t.id); cancelEdit(); }}
+                          style={{ background: "none", border: "none", color: red, fontSize: 12, cursor: "pointer", marginLeft: "auto" }}
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <span key={t.id} style={{ display: "inline-flex", alignItems: "center", gap: 2, fontSize: 14 }}>
+                      {i > 0 && <span style={{ color: inkSoft, marginRight: 2 }}>,</span>}
+                      <button onClick={() => startEdit(t)} style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontSize: 14, color: ink, textDecoration: "underline", textDecorationColor: border }}>
+                        {medLabel(t)}
                       </button>
                     </span>
                   )
