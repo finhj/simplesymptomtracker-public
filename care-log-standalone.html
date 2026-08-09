@@ -365,19 +365,34 @@ function Sparkline({ points, kind, unitSystem, scaleMax, meds, domain, onViewCha
     lastX = x;
     return { ...g, x, extraLift: stagger * 6 };
   });
-  // Only label points when there aren't too many, so a busy chart doesn't turn into
-  // the same overlapping-text problem the medication markers had.
-  const showValueLabels = kind === "temperature" && display.length > 0 && display.length <= 8;
-  let lastLabelX = -Infinity;
-  let labelBelow = false;
-  const valueLabels = showValueLabels
-    ? display.map((p) => {
-        const x = scaleX(p.t);
-        labelBelow = x - lastLabelX < 26 ? !labelBelow : false;
-        lastLabelX = x;
-        return { x, y: scaleY(p.v), value: p.v, below: labelBelow };
-      })
-    : [];
+  // Bounded label set so the chart stays clean at every zoom level, not just some of
+  // them. When there's room, label every point. When zoomed out to many points, don't
+  // go silent — always surface the most recent reading and the peak, tagged so it's
+  // clear why those two specifically are called out.
+  const MAX_LABEL_ALL = 8;
+  let valueLabels = [];
+  function withCollisionAvoidance(points) {
+    let lastLabelX = -Infinity;
+    let labelBelow = false;
+    return points.map((p) => {
+      const x = scaleX(p.t);
+      labelBelow = x - lastLabelX < 26 ? !labelBelow : false;
+      lastLabelX = x;
+      return { x, y: scaleY(p.v), value: p.v, below: labelBelow, tag: p.tag };
+    });
+  }
+  if (kind === "temperature" && display.length > 0) {
+    if (display.length <= MAX_LABEL_ALL) {
+      valueLabels = withCollisionAvoidance(display);
+    } else {
+      const latest = display[display.length - 1];
+      const peak = display.reduce((a, b) => (b.v > a.v ? b : a), display[0]);
+      const chosen = [{ ...latest, tag: "Now" }];
+      if (peak.t !== latest.t) chosen.push({ ...peak, tag: "Peak" });
+      chosen.sort((a, b) => a.t - b.t);
+      valueLabels = withCollisionAvoidance(chosen);
+    }
+  }
 
   const AXIS_ROW_HEIGHT = 14;
   const chartHeight = (staggeredMeds.length ? height + 10 + Math.max(...staggeredMeds.map((m) => m.extraLift), 0) : height) + AXIS_ROW_HEIGHT;
@@ -413,11 +428,10 @@ function Sparkline({ points, kind, unitSystem, scaleMax, meds, domain, onViewCha
         {display.map((p, i) => (
           <circle key={i} cx={scaleX(p.t)} cy={scaleY(p.v)} r={2.5} fill={kind === "temperature" && p.v >= feverLine ? red : teal} />
         ))}
-        {/* Temperature values written next to each point — only while there are few
-            enough points to stay readable. A dense chart (many readings in view) skips
-            the numbers rather than risk the same overlap/cutoff problems the medication
-            labels had; the dots and line are still there, and a narrower range preset
-            or a pinch-zoom brings the numbers back. */}
+        {/* Temperature values written next to each point when there's room. Once a
+            chart has more points than fit cleanly, it doesn't go silent — it always
+            shows the most recent reading and the peak, tagged, so there's never a
+            zoom level where the chart has numbers everywhere or nowhere. */}
         {valueLabels.map((l, i) => (
           <g key={i}>
             <text
@@ -425,14 +439,14 @@ function Sparkline({ points, kind, unitSystem, scaleMax, meds, domain, onViewCha
               fontSize={10} fontWeight={700} fill="none" stroke={card} strokeWidth={3} strokeLinejoin="round"
               fontFamily="-apple-system, sans-serif"
             >
-              {l.value.toFixed(1)}
+              {l.tag ? `${l.tag} ` : ""}{l.value.toFixed(1)}{l.tag ? unit : ""}
             </text>
             <text
               x={l.x} y={l.below ? l.y + 14 : l.y - 6} textAnchor="middle"
-              fontSize={10} fontWeight={700} fill={ink}
+              fontSize={10} fontWeight={700} fill={l.tag === "Peak" ? red : ink}
               fontFamily="-apple-system, sans-serif"
             >
-              {l.value.toFixed(1)}
+              {l.tag ? `${l.tag} ` : ""}{l.value.toFixed(1)}{l.tag ? unit : ""}
             </text>
           </g>
         ))}
