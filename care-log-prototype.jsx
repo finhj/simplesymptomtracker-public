@@ -185,7 +185,10 @@ function sleep(ms) {
 }
 
 // ---------- Lightweight sparkline (no chart library — fast load) ----------
-function Sparkline({ points, kind, unitSystem, scaleMax, meds, domain }) {
+function Sparkline({ points, kind, unitSystem, scaleMax, meds, domain, onViewChange }) {
+  const svgRef = useRef(null);
+  const gestureRef = useRef(null);
+  const [showMedList, setShowMedList] = useState(false);
   const width = 260, height = 56, pad = 6;
   const chartLeft = 34; // reserve space for axis labels
   const plotWidth = width - chartLeft;
@@ -208,6 +211,56 @@ function Sparkline({ points, kind, unitSystem, scaleMax, meds, domain }) {
   const last = display[display.length - 1];
   const axisLabelStyle = { fontSize: 9, fill: inkSoft, fontFamily: "-apple-system, sans-serif" };
 
+  // ---------- Pinch-to-zoom / drag-to-pan ----------
+  // Uses refs (not state) to track an in-progress gesture so intermediate touchmove
+  // events don't each trigger a full re-render — only the resulting domain change does,
+  // via onViewChange, which is owned by the parent so every chart stays in sync.
+  function touchDistance(t0, t1) {
+    const dx = t0.clientX - t1.clientX;
+    const dy = t0.clientY - t1.clientY;
+    return Math.sqrt(dx * dx + dy * dy);
+  }
+  function handleTouchStart(e) {
+    if (!onViewChange || !svgRef.current) return;
+    const rect = svgRef.current.getBoundingClientRect();
+    if (e.touches.length === 2) {
+      const [t0, t1] = e.touches;
+      gestureRef.current = {
+        mode: "pinch", rect, startMinX: minX, startMaxX: maxX,
+        startDist: touchDistance(t0, t1),
+        centerClientX: (t0.clientX + t1.clientX) / 2,
+      };
+    } else if (e.touches.length === 1) {
+      gestureRef.current = { mode: "pan", rect, startMinX: minX, startMaxX: maxX, startClientX: e.touches[0].clientX };
+    }
+  }
+  function handleTouchMove(e) {
+    const g = gestureRef.current;
+    if (!g || !onViewChange) return;
+    try { e.preventDefault(); } catch (_) {}
+    const cssScale = g.rect.width / width || 1;
+    const span = g.startMaxX - g.startMinX;
+    if (g.mode === "pan" && e.touches.length === 1) {
+      const dxLogical = (e.touches[0].clientX - g.startClientX) / cssScale;
+      const pxToTime = span / plotWidth;
+      const shift = -dxLogical * pxToTime;
+      onViewChange({ minX: g.startMinX + shift, maxX: g.startMaxX + shift });
+    } else if (g.mode === "pinch" && e.touches.length === 2) {
+      const [t0, t1] = e.touches;
+      const dist = touchDistance(t0, t1);
+      const ratio = Math.max(dist / (g.startDist || 1), 0.05);
+      const newSpan = span / ratio;
+      const anchorLogicalX = (g.centerClientX - g.rect.left) / cssScale;
+      const anchorFraction = Math.min(Math.max((anchorLogicalX - chartLeft) / plotWidth, 0), 1);
+      const anchorTime = g.startMinX + anchorFraction * span;
+      const newMin = anchorTime - anchorFraction * newSpan;
+      onViewChange({ minX: newMin, maxX: newMin + newSpan });
+    }
+  }
+  function handleTouchEnd() {
+    gestureRef.current = null;
+  }
+
   // Medications logged within this chart's visible time range, shown as a bullet
   // with a diagonal label rising from it. Grouped by displayed minute first (same
   // grouping used in the medication list) so two meds given together produce one
@@ -227,57 +280,92 @@ function Sparkline({ points, kind, unitSystem, scaleMax, meds, domain }) {
   }));
   const baseY = height - pad;
   // Gap and stagger sized for the larger, more-legible label font below.
-  const MIN_MARKER_GAP_PX = 34;
+  const MIN_MARKER_GAP_PX = 40;
   let lastX = -Infinity;
   let stagger = 0;
   const staggeredMeds = chartMedGroups.map((g) => {
     const x = scaleX(g.t);
     stagger = x - lastX < MIN_MARKER_GAP_PX ? stagger + 1 : 0;
     lastX = x;
-    return { ...g, x, extraLift: stagger * 14 };
+    return { ...g, x, extraLift: stagger * 16 };
   });
-  const chartHeight = staggeredMeds.length ? height + 36 + Math.max(...staggeredMeds.map((m) => m.extraLift), 0) : height;
+  const chartHeight = staggeredMeds.length ? height + 30 + Math.max(...staggeredMeds.map((m) => m.extraLift), 0) : height;
   const medDark = "#33506E"; // darker than the standard blue accent, for better contrast at small sizes
+  const sortedMedList = [...staggeredMeds].sort((a, b) => a.t - b.t);
 
   return (
-    <svg width={width} height={chartHeight} style={{ overflow: "visible" }} role="img"
-      aria-label={`Trend chart, scale ${minY} to ${maxY}${unit}, latest value ${last.v.toFixed(1)}${unit}${staggeredMeds.length ? `. Medications in range: ${staggeredMeds.map((m) => m.label).join("; ")}` : ""}`}>
-      {kind === "temperature" && (
-        <rect x={chartLeft} y={scaleY(feverLine)} width={plotWidth} height={Math.max(scaleY(maxY) - scaleY(feverLine), 0)} fill={redSoft} opacity={0.5} />
-      )}
-      <text x={0} y={scaleY(maxY) + 3} style={axisLabelStyle}>{maxY.toFixed(0)}{unit}</text>
-      <text x={0} y={scaleY(minY) - 1} style={axisLabelStyle}>{minY.toFixed(0)}{unit}</text>
-      {kind === "temperature" && (
-        <text x={0} y={scaleY(feverLine) + 3} style={{ ...axisLabelStyle, fill: red, fontWeight: 700 }}>{feverLine.toFixed(1)}</text>
-      )}
-      <line x1={chartLeft} y1={pad} x2={chartLeft} y2={height - pad} stroke={border} strokeWidth={1} />
-      <path d={d} fill="none" stroke={ink} strokeWidth={1.5} />
-      {display.map((p, i) => (
-        <circle key={i} cx={scaleX(p.t)} cy={scaleY(p.v)} r={2.5} fill={kind === "temperature" && p.v >= feverLine ? red : teal} />
-      ))}
-      {staggeredMeds.map((m) => (
-        <g key={m.id}>
-          <line x1={m.x} y1={baseY} x2={m.x} y2={pad - m.extraLift} stroke={blue} strokeOpacity={0.35} strokeDasharray="2 2" />
-          <circle cx={m.x} cy={baseY} r={3} fill={medDark} stroke={card} strokeWidth={1} />
-          {/* Rendered twice: a thick pale "halo" copy first so the label stays readable
-              over the chart line or other labels behind it, then the real text on top. */}
-          <text
-            x={m.x} y={baseY - m.extraLift} transform={`rotate(-45 ${m.x} ${baseY - m.extraLift})`} dx={6} dy={-4}
-            fontSize={11} fontWeight={700} fill="none" stroke={card} strokeWidth={3} strokeLinejoin="round"
-            fontFamily="-apple-system, sans-serif"
+    <div>
+      <svg
+        ref={svgRef}
+        width={width}
+        height={chartHeight}
+        style={{ overflow: "visible", touchAction: "none" }}
+        onTouchStart={handleTouchStart}
+        onTouchMove={handleTouchMove}
+        onTouchEnd={handleTouchEnd}
+        onTouchCancel={handleTouchEnd}
+        role="img"
+        aria-label={`Trend chart, scale ${minY} to ${maxY}${unit}, latest value ${last.v.toFixed(1)}${unit}${staggeredMeds.length ? `. Medications in range: ${staggeredMeds.map((m) => m.label).join("; ")}` : ""}`}>
+        {kind === "temperature" && (
+          <rect x={chartLeft} y={scaleY(feverLine)} width={plotWidth} height={Math.max(scaleY(maxY) - scaleY(feverLine), 0)} fill={redSoft} opacity={0.5} />
+        )}
+        <text x={0} y={scaleY(maxY) + 3} style={axisLabelStyle}>{maxY.toFixed(0)}{unit}</text>
+        <text x={0} y={scaleY(minY) - 1} style={axisLabelStyle}>{minY.toFixed(0)}{unit}</text>
+        {kind === "temperature" && (
+          <text x={0} y={scaleY(feverLine) + 3} style={{ ...axisLabelStyle, fill: red, fontWeight: 700 }}>{feverLine.toFixed(1)}</text>
+        )}
+        <line x1={chartLeft} y1={pad} x2={chartLeft} y2={height - pad} stroke={border} strokeWidth={1} />
+        <path d={d} fill="none" stroke={ink} strokeWidth={1.5} />
+        {display.map((p, i) => (
+          <circle key={i} cx={scaleX(p.t)} cy={scaleY(p.v)} r={2.5} fill={kind === "temperature" && p.v >= feverLine ? red : teal} />
+        ))}
+        {staggeredMeds.map((m) => (
+          <g key={m.id}>
+            <line x1={m.x} y1={baseY} x2={m.x} y2={pad - m.extraLift} stroke={blue} strokeOpacity={0.35} strokeDasharray="2 2" />
+            <circle cx={m.x} cy={baseY} r={3} fill={medDark} stroke={card} strokeWidth={1} />
+            {/* Rendered twice: a thick pale "halo" copy first so the label stays readable
+                over the chart line or other labels behind it, then the real text on top.
+                Kept short and gently angled — the full names/doses live in the tap-to-expand
+                list below, this is just a hint of what's there and roughly when. */}
+            <text
+              x={m.x} y={baseY - m.extraLift} transform={`rotate(-20 ${m.x} ${baseY - m.extraLift})`} dx={6} dy={-4}
+              fontSize={11} fontWeight={700} fill="none" stroke={card} strokeWidth={3} strokeLinejoin="round"
+              fontFamily="-apple-system, sans-serif"
+            >
+              {m.label}
+            </text>
+            <text
+              x={m.x} y={baseY - m.extraLift} transform={`rotate(-20 ${m.x} ${baseY - m.extraLift})`} dx={6} dy={-4}
+              fontSize={11} fontWeight={700} fill={medDark}
+              fontFamily="-apple-system, sans-serif"
+            >
+              {m.label}
+            </text>
+          </g>
+        ))}
+      </svg>
+
+      {sortedMedList.length > 0 && (
+        <div style={{ marginTop: 4 }}>
+          <button
+            onClick={() => setShowMedList((s) => !s)}
+            style={{ background: "none", border: "none", color: blue, fontSize: 11, fontWeight: 600, padding: 0, cursor: "pointer" }}
           >
-            {m.label}
-          </text>
-          <text
-            x={m.x} y={baseY - m.extraLift} transform={`rotate(-45 ${m.x} ${baseY - m.extraLift})`} dx={6} dy={-4}
-            fontSize={11} fontWeight={700} fill={medDark}
-            fontFamily="-apple-system, sans-serif"
-          >
-            {m.label}
-          </text>
-        </g>
-      ))}
-    </svg>
+            {showMedList ? "Hide medications" : `Medications in view (${sortedMedList.length})`}
+          </button>
+          {showMedList && (
+            <div style={{ marginTop: 6, background: paper, border: `1px solid ${border}`, borderRadius: 10, padding: "6px 8px" }}>
+              {sortedMedList.map((m) => (
+                <div key={m.id} style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 12, padding: "5px 0", borderBottom: `1px solid ${paperDark}` }}>
+                  <span style={{ color: medDark, fontWeight: 600 }}>{m.label}</span>
+                  <span style={{ color: inkSoft, flexShrink: 0 }}>{fmtTime(m.t)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -494,10 +582,9 @@ export default function CareLog() {
   const activeTrackers = useMemo(() => trackers.filter((t) => !t.archived), [trackers]);
   const remainingSlots = MAX_TRACKERS - activeTrackers.length;
 
-  // One shared time domain for every chart, so trackers and medications are always
-  // plotted on the same timeline and can be visually compared side by side, rather
-  // than each card silently picking its own window based on just its own data.
-  const chartDomain = useMemo(() => {
+  // Absolute bounds — the full span of everything logged. Zoom/pan and range
+  // presets are always clamped within this, so you can't pan into empty space.
+  const fullDomain = useMemo(() => {
     const times = [];
     activeTrackers.forEach((t) => {
       entries.forEach((e) => {
@@ -509,6 +596,52 @@ export default function CareLog() {
     if (times.length === 0) return null;
     return { minX: Math.min(...times), maxX: Math.max(...times) };
   }, [activeTrackers, entries, meds]);
+
+  const [rangePreset, setRangePreset] = useState("all"); // "24h" | "3d" | "7d" | "all"
+  const [customViewDomain, setCustomViewDomain] = useState(null); // set by pinch/drag on any chart
+
+  const presetDomain = useMemo(() => {
+    if (rangePreset === "all" || !fullDomain) return null;
+    const hours = { "24h": 24, "3d": 72, "7d": 168 }[rangePreset];
+    const end = Math.max(Date.now(), fullDomain.maxX);
+    return { minX: end - hours * 3600 * 1000, maxX: end };
+  }, [rangePreset, fullDomain]);
+
+  // One shared time domain for every chart, so trackers and medications are always
+  // plotted on the same timeline and can be visually compared side by side, rather
+  // than each card silently picking its own window.
+  const chartDomain = customViewDomain || presetDomain || fullDomain;
+  const isZoomed = customViewDomain !== null || rangePreset !== "all";
+
+  function selectRangePreset(preset) {
+    setRangePreset(preset);
+    setCustomViewDomain(null);
+  }
+
+  function resetView() {
+    setRangePreset("all");
+    setCustomViewDomain(null);
+  }
+
+  // Called by any chart's pinch/drag gesture. Clamps to fullDomain (with a little
+  // outward padding so you can pan slightly past the edges) and enforces a minimum
+  // zoomed-in span so the view can never collapse to nothing.
+  function handleViewChange(nextDomain) {
+    if (!fullDomain) return;
+    const MIN_SPAN = 30 * 60 * 1000; // 30 minutes
+    let { minX, maxX } = nextDomain;
+    if (maxX - minX < MIN_SPAN) {
+      const mid = (minX + maxX) / 2;
+      minX = mid - MIN_SPAN / 2;
+      maxX = mid + MIN_SPAN / 2;
+    }
+    const pad = Math.max((fullDomain.maxX - fullDomain.minX) * 0.1, MIN_SPAN);
+    const lower = fullDomain.minX - pad;
+    const upper = fullDomain.maxX + pad;
+    if (minX < lower) { maxX += lower - minX; minX = lower; }
+    if (maxX > upper) { minX -= maxX - upper; maxX = upper; }
+    setCustomViewDomain({ minX: Math.max(minX, lower), maxX: Math.min(maxX, upper) });
+  }
 
   const knownMedNames = useMemo(() => [...new Set(meds.map((m) => m.name.trim().toLowerCase()))], [meds]);
   const medCatalogCount = knownMedNames.length;
@@ -836,6 +969,32 @@ export default function CareLog() {
           </div>
         ) : (
           <>
+            {activeTrackers.length > 0 && chartDomain && (
+              <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 10, flexWrap: "wrap" }}>
+                {[
+                  { key: "24h", label: "24h" },
+                  { key: "3d", label: "3 days" },
+                  { key: "7d", label: "7 days" },
+                  { key: "all", label: "All" },
+                ].map((r) => (
+                  <button
+                    key={r.key}
+                    onClick={() => selectRangePreset(r.key)}
+                    style={{
+                      ...toggleBtn, flex: "0 0 auto", padding: "6px 12px", fontSize: 12,
+                      ...(rangePreset === r.key && customViewDomain === null ? toggleBtnActive : {}),
+                    }}
+                  >
+                    {r.label}
+                  </button>
+                ))}
+                {isZoomed && (
+                  <button onClick={resetView} style={{ background: "none", border: "none", color: blue, fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
+                    Reset view
+                  </button>
+                )}
+              </div>
+            )}
             {activeTrackers.map((t) => (
               <TrackerCard
                 key={t.id}
@@ -846,6 +1005,7 @@ export default function CareLog() {
                 unitSystem={profile.unitSystem}
                 meds={meds}
                 domain={chartDomain}
+                onViewChange={handleViewChange}
                 draftValue={draftValues[t.id]}
                 onDraftChange={(v) => setDraftValues((d) => ({ ...d, [t.id]: v }))}
                 onLog={(v, atTime) => logValue(t.id, v, t.type === "temperature", atTime)}
@@ -916,7 +1076,7 @@ function Field({ label, children }) {
   );
 }
 
-function TrackerCard({ tracker, series, latest, history, unitSystem, meds, domain, draftValue, onDraftChange, onLog, onArchive, onUpdateEntry, onDeleteEntry }) {
+function TrackerCard({ tracker, series, latest, history, unitSystem, meds, domain, onViewChange, draftValue, onDraftChange, onLog, onArchive, onUpdateEntry, onDeleteEntry }) {
   const unitLabel = tracker.type === "temperature" ? tempUnitLabel(unitSystem) : null;
   const [customTime, setCustomTime] = useState(null); // null = log at "now" (the fast default)
   const [showHistory, setShowHistory] = useState(false);
@@ -960,7 +1120,7 @@ function TrackerCard({ tracker, series, latest, history, unitSystem, meds, domai
       </div>
 
       <div style={{ display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap" }}>
-        <Sparkline points={series} kind={tracker.type} unitSystem={unitSystem} scaleMax={tracker.scaleMax} meds={tracker.type !== "boolean" ? meds : null} domain={domain} />
+        <Sparkline points={series} kind={tracker.type} unitSystem={unitSystem} scaleMax={tracker.scaleMax} meds={tracker.type !== "boolean" ? meds : null} domain={domain} onViewChange={onViewChange} />
         <div style={{ flex: 1, minWidth: 140 }}>
           {tracker.type === "temperature" && (
             <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
