@@ -71,7 +71,7 @@ const LocalStore = {
 
 const STORAGE_KEY = "care-log-vault-v1";
 const PBKDF2_ITERATIONS = 300000;
-const MAX_TRACKERS = 3;
+const MAX_TRACKERS = 20; // Personal build — the real free-tier cap (3) only matters once there's an actual entitlement system with other users to enforce it against.
 const MAX_MEDICATIONS = 15;
 
 // Canonical storage is always Celsius; display converts at the edges.
@@ -1606,7 +1606,7 @@ function TemplatePicker({ query, setQuery, templates, remainingSlots, openTempla
         )}
         {remainingSlots === 0 && (
           <div style={{ ...errorStyle, marginTop: 10 }}>
-            You've reached the free plan's 3-tracker limit. Archive an existing tracker to add a new one.
+            You've reached the free plan's {MAX_TRACKERS}-tracker limit. Archive an existing tracker to add a new one.
           </div>
         )}
         <button
