@@ -273,6 +273,7 @@ function Sparkline({ points, kind, unitSystem, scaleMax, meds, domain, onViewCha
   const svgRef = useRef(null);
   const gestureRef = useRef(null);
   const [showMedList, setShowMedList] = useState(false);
+  const [showMedMarkers, setShowMedMarkers] = useState(true);
   const width = 260, height = 100, pad = 8;
   const chartLeft = 34; // reserve space for axis labels
   const plotWidth = width - chartLeft;
@@ -419,7 +420,7 @@ function Sparkline({ points, kind, unitSystem, scaleMax, meds, domain, onViewCha
   }
 
   const AXIS_ROW_HEIGHT = 14;
-  const medRowHeight = staggeredMeds.length ? MED_ROW_GAP + 8 + Math.max(...staggeredMeds.map((m) => m.extraLift), 0) : 0;
+  const medRowHeight = showMedMarkers && staggeredMeds.length ? MED_ROW_GAP + 8 + Math.max(...staggeredMeds.map((m) => m.extraLift), 0) : 0;
   const chartHeight = height + medRowHeight + AXIS_ROW_HEIGHT;
   const sortedMedList = groupMedsByDisplayTime(medsInRange); // grouped-by-time, for the readable list only
   const xAxisY = chartHeight - 2;
@@ -479,7 +480,7 @@ function Sparkline({ points, kind, unitSystem, scaleMax, meds, domain, onViewCha
             merged into one. Below the plot, in their own row, so they can never be
             confused with the actual data dots. The "Medications in view" list below
             is the readable source for names/doses/times; these just mark when/what. */}
-        {staggeredMeds.map((m) => (
+        {showMedMarkers && staggeredMeds.map((m) => (
           <rect
             key={m.id}
             x={-4.5} y={-4.5} width={9} height={9} rx={1.5}
@@ -490,13 +491,26 @@ function Sparkline({ points, kind, unitSystem, scaleMax, meds, domain, onViewCha
       </svg>
 
       {medsInRange.length > 0 && (
-        <div style={{ marginTop: 4 }}>
+        <div style={{ marginTop: 4, display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
           <button
             onClick={() => setShowMedList((s) => !s)}
             style={{ background: "none", border: "none", color: blue, fontSize: 11, fontWeight: 600, padding: 0, cursor: "pointer" }}
           >
             {showMedList ? "Hide medications" : `Medications in view (${medsInRange.length})`}
           </button>
+          <label style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11, color: inkSoft, cursor: "pointer" }}>
+            <input
+              type="checkbox"
+              checked={showMedMarkers}
+              onChange={(e) => setShowMedMarkers(e.target.checked)}
+              style={{ accentColor: blue, width: 14, height: 14 }}
+            />
+            Show on chart
+          </label>
+        </div>
+      )}
+      {medsInRange.length > 0 && (
+        <div style={{ marginTop: 4 }}>
           {showMedList && (
             <div style={{ marginTop: 6, background: paper, border: `1px solid ${border}`, borderRadius: 10, padding: "6px 8px" }}>
               {sortedMedList.map((g) => (
