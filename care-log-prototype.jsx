@@ -10,6 +10,7 @@ const MAX_MEDICATIONS = 15;
 // Verified against CDC / Harvard Health / Cleveland Clinic / AAP-aligned study — see verified-facts-log.md
 const FEVER_C = 38.0;        // 100.4°F
 const LOW_GRADE_C = 37.5;    // 99.5°F — corrected from an earlier unverified 99°F
+const ELEVATED_C = 37.3;     // 99.1°F — "elevated/high-normal, not yet fever" per multiple sources; some sources place low-grade fever's start here instead of 99.5°F, genuine disagreement in the literature
 
 function cToF(c) { return (c * 9) / 5 + 32; }
 function fToC(f) { return ((f - 32) * 5) / 9; }
@@ -28,6 +29,10 @@ const paperDark = "#EFEAE0";
 const card = "#FFFDF9";
 const border = "#DDD6C7";
 const teal = "#2F6F68";
+const elevatedYellow = "#B8952E";
+const elevatedYellowSoft = "#F3EACB";
+const lowGradeOrange = "#D96A2B";
+const lowGradeOrangeSoft = "#F6DCC8";
 const tealSoft = "#DCEAE7";
 const amber = "#D98B3F";
 const amberSoft = "#F5E3CB";
@@ -321,6 +326,8 @@ function Sparkline({ points, kind, unitSystem, scaleMax, meds, treatments, flagg
     maxY = scaleMax || 5;
   }
   const feverLine = kind === "temperature" ? displayTemp(FEVER_C, unitSystem) : null;
+  const lowGradeLine = kind === "temperature" ? displayTemp(LOW_GRADE_C, unitSystem) : null;
+  const elevatedLine = kind === "temperature" ? displayTemp(ELEVATED_C, unitSystem) : null;
   const unit = kind === "temperature" ? tempUnitLabel(unitSystem) : "";
   const xs = display.map((p) => p.t);
   // Prefer the shared domain (same timeline across every tracker + med chart) — fall
@@ -553,7 +560,11 @@ function Sparkline({ points, kind, unitSystem, scaleMax, meds, treatments, flagg
           />
         ))}
         {kind === "temperature" && (
-          <rect x={chartLeft} y={scaleY(feverLine)} width={plotWidth} height={Math.max(scaleY(maxY) - scaleY(feverLine), 0)} fill={redSoft} opacity={0.5} />
+          <>
+            <rect x={chartLeft} y={scaleY(lowGradeLine)} width={plotWidth} height={Math.max(scaleY(elevatedLine) - scaleY(lowGradeLine), 0)} fill={elevatedYellowSoft} opacity={0.5} />
+            <rect x={chartLeft} y={scaleY(feverLine)} width={plotWidth} height={Math.max(scaleY(lowGradeLine) - scaleY(feverLine), 0)} fill={lowGradeOrangeSoft} opacity={0.5} />
+            <rect x={chartLeft} y={scaleY(maxY)} width={plotWidth} height={Math.max(scaleY(feverLine) - scaleY(maxY), 0)} fill={redSoft} opacity={0.5} />
+          </>
         )}
         <text x={0} y={scaleY(maxY) + 3} style={axisLabelStyle}>{maxY.toFixed(0)}{unit}</text>
         <text x={0} y={scaleY(minY) - 1} style={axisLabelStyle}>{minY.toFixed(0)}{unit}</text>
@@ -565,7 +576,16 @@ function Sparkline({ points, kind, unitSystem, scaleMax, meds, treatments, flagg
         <text x={width} y={xAxisY} textAnchor="end" style={axisLabelStyle}>{fmtAxisTime(maxX)}</text>
         <path d={d} fill="none" stroke={ink} strokeWidth={1.5} />
         {display.map((p, i) => (
-          <circle key={i} cx={scaleX(p.t)} cy={scaleY(p.v)} r={4} fill={kind === "temperature" && p.v >= feverLine ? red : teal} />
+          <circle
+            key={i} cx={scaleX(p.t)} cy={scaleY(p.v)} r={4}
+            fill={
+              kind !== "temperature" ? teal
+              : p.v >= feverLine ? red
+              : p.v >= lowGradeLine ? lowGradeOrange
+              : p.v >= elevatedLine ? elevatedYellow
+              : teal
+            }
+          />
         ))}
         {/* Temperature values written next to each point when there's room. Once a
             chart has more points than fit cleanly, it doesn't go silent — it always
