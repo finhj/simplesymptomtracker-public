@@ -722,6 +722,7 @@ export default function CareLog() {
   const cryptoKeyRef = useRef(null);
   const saltRef = useRef(null);
   const skippedInitialPersist = useRef(false);
+  const persistDebounceRef = useRef(null);
   const loadedRef = useRef(false);
 
   // ---------- Initial load ----------
@@ -770,7 +771,39 @@ export default function CareLog() {
       skippedInitialPersist.current = true;
       return;
     }
-    persist(trackers, entries, meds, profile, concerns, customTrackerDefs, flaggedPeriods, treatments, notes);
+    // Debounced, not immediate — logging again before a prior save finishes used to
+    // start a second, overlapping save. Async writes don't guarantee completion
+    // order, so an in-flight older save could finish after a newer one and silently
+    // overwrite it with a stale snapshot missing the most recent entry. Waiting for
+    // things to settle before writing means only one save ever runs at a time, and
+    // it always reflects the truly latest state, not whichever write happened to
+    // finish last.
+    if (persistDebounceRef.current) clearTimeout(persistDebounceRef.current);
+    persistDebounceRef.current = setTimeout(() => {
+      persistDebounceRef.current = null;
+      persist(trackers, entries, meds, profile, concerns, customTrackerDefs, flaggedPeriods, treatments, notes);
+    }, 500);
+
+    // Safety net: an abrupt tab close or app-backgrounding doesn't reliably run
+    // effect cleanup, especially on mobile — a pending debounced save could simply
+    // never fire, silently losing whatever was logged in the last half-second.
+    // visibilitychange (not beforeunload, which mobile Safari especially tends not
+    // to fire reliably) flushes any pending save immediately the moment the app
+    // stops being visible, using this render's current — and therefore latest —
+    // state via closure.
+    function flushOnHide() {
+      if (document.visibilityState === "hidden" && persistDebounceRef.current) {
+        clearTimeout(persistDebounceRef.current);
+        persistDebounceRef.current = null;
+        persist(trackers, entries, meds, profile, concerns, customTrackerDefs, flaggedPeriods, treatments, notes);
+      }
+    }
+    document.addEventListener("visibilitychange", flushOnHide);
+
+    return () => {
+      if (persistDebounceRef.current) clearTimeout(persistDebounceRef.current);
+      document.removeEventListener("visibilitychange", flushOnHide);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [trackers, entries, meds, profile, concerns, customTrackerDefs, flaggedPeriods, treatments, notes]);
 
