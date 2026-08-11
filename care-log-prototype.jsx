@@ -10,7 +10,7 @@ const MAX_MEDICATIONS = 15;
 // Verified against CDC / Harvard Health / Cleveland Clinic / AAP-aligned study — see verified-facts-log.md
 const FEVER_C = 38.0;        // 100.4°F
 const LOW_GRADE_C = 37.5;    // 99.5°F — corrected from an earlier unverified 99°F
-const ELEVATED_C = 37.3;     // 99.1°F — "elevated/high-normal, not yet fever" per multiple sources; some sources place low-grade fever's start here instead of 99.5°F, genuine disagreement in the literature
+const ELEVATED_C = 37.17;    // 98.9°F — user's explicit choice, below the 99.1°F literature value (which itself sat within genuine source disagreement — see verified-facts-log.md)
 
 function cToF(c) { return (c * 9) / 5 + 32; }
 function fToC(f) { return ((f - 32) * 5) / 9; }
